@@ -1,5 +1,4 @@
 import { useEffect, useState } from "react";
-import { CATEGORIES, type GoalCategory } from "@/lib/categories";
 import { tagline } from "@/lib/tokens";
 import { isValidWalletMnemonic, normalizeMnemonic } from "@/lib/zec";
 import { createWalletNative, finalizeCreateWalletNative, restoreWalletNative, type NativeWalletSnapshot } from "@/lib/wallet-native";
@@ -7,10 +6,7 @@ import { useSettings, useWalletStore } from "@/stores";
 import { Icon } from "@/components/Icon";
 import { toast } from "@/stores/toast";
 
-type SavingsLevel = "0" | "<50" | "50-100" | ">100";
-type Stage = "starting" | "consistent" | "rebuilding" | "streak";
-
-const STEPS = ["Welcome", "Habits", "First goal", "Wallet", "Seed phrase"] as const;
+const STEPS = ["Welcome", "Wallet", "Seed phrase", "Backup"] as const;
 
 const surface = "var(--color-bg-raised)";
 const border = "var(--color-border)";
@@ -21,10 +17,9 @@ export function Onboarding() {
   const applyWalletSnapshot = useWalletStore((s) => s.applyWalletSnapshot);
   const [step, setStep] = useState(0);
   const [name, setName] = useState("");
-  const [savings, setSavings] = useState<SavingsLevel | null>(null);
-  const [stage, setStage] = useState<Stage | null>(null);
-  const [goal, setGoal] = useState<GoalCategory | null>(null);
   const [walletChoice, setWalletChoice] = useState<"create" | "recover" | null>(null);
+  const [walletPassword, setWalletPassword] = useState("");
+  const [walletPasswordConfirm, setWalletPasswordConfirm] = useState("");
   const [seed, setSeed] = useState<string[]>([]);
   const [seedLoading, setSeedLoading] = useState(false);
   const [submitting, setSubmitting] = useState(false);
@@ -43,8 +38,13 @@ export function Onboarding() {
   });
   const [verifyVals, setVerifyVals] = useState<Record<number, string>>({});
   const allVerified = verifyIdx.every((i) => verifyVals[i]?.trim().toLowerCase() === seed[i]);
+  const passwordValid = walletPassword.length >= 8 && walletPassword === walletPasswordConfirm;
+  const [backupConfirmed, setBackupConfirmed] = useState(false);
+  const [backupDownloaded, setBackupDownloaded] = useState(false);
 
   useEffect(() => {
+    setBackupConfirmed(false);
+    setBackupDownloaded(false);
     if (walletChoice === "create") return;
     setSeed([]);
     setCreatedSnapshot(null);
@@ -54,13 +54,14 @@ export function Onboarding() {
   }, [walletChoice]);
 
   useEffect(() => {
-    if (step !== 4 || walletChoice !== "create" || createdSnapshot || seedLoading || seedError) return;
+    if (step !== 2 || walletChoice !== "create" || createdSnapshot || seedLoading || seedError) return;
+    if (walletPassword.length < 8) return;
     let ignore = false;
     const loadSeed = async () => {
       try {
         setSeedLoading(true);
         setSeedError(null);
-        const created = await createWalletNative(network);
+        const created = await createWalletNative(network, walletPassword);
         if (ignore) return;
         setSeed(created.mnemonicWords);
         setCreatedSnapshot(created.snapshot);
@@ -82,15 +83,36 @@ export function Onboarding() {
     return () => {
       ignore = true;
     };
-  }, [createdSnapshot, network, seedError, seedLoading, step, walletChoice, seedRetryToken]);
+  }, [createdSnapshot, network, seedError, seedLoading, step, walletChoice, seedRetryToken, walletPassword]);
 
   const canContinue =
     step === 0 ? name.trim().length > 0 :
-    step === 1 ? savings !== null && stage !== null :
-    step === 2 ? goal !== null :
-    step === 3 ? walletChoice !== null :
-    step === 4 ? walletChoice === "recover" ? recoverValid : seed.length === 24 && allVerified && !seedLoading :
+    step === 1 ? walletChoice !== null && passwordValid :
+    step === 2 ? walletChoice === "recover" ? recoverValid : seed.length === 24 && allVerified && !seedLoading :
+    step === 3 ? backupConfirmed :
     false;
+
+  function downloadBackupFile() {
+    const content = [
+      "ZecVault Wallet Backup",
+      `Created At: ${new Date().toISOString()}`,
+      `Network: ${network}`,
+      "",
+      walletChoice === "create" ? `Seed Phrase: ${seed.join(" ")}` : `Recovered Seed Phrase: ${recoverNormalized}`,
+      "",
+      "Keep this file offline and encrypted. Anyone with this seed can spend your funds.",
+    ].join("\n");
+    const blob = new Blob([content], { type: "text/plain;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `zecvault-backup-${Date.now()}.txt`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+    setBackupDownloaded(true);
+  }
 
   async function next() {
     if (!canContinue || submitting) return;
@@ -102,7 +124,7 @@ export function Onboarding() {
         }
         try {
           setSubmitting(true);
-          const finalized = await finalizeCreateWalletNative(seed.join(" "), network, undefined, createdDraftId);
+          const finalized = await finalizeCreateWalletNative(seed.join(" "), network, walletPassword, undefined, createdDraftId);
           if (!finalized.ok || !finalized.snapshot) {
             toast({ type: "danger", title: "Wallet creation failed", description: finalized.error ?? "Could not finalize wallet creation." });
             return;
@@ -118,7 +140,7 @@ export function Onboarding() {
       } else {
         try {
           setSubmitting(true);
-          const restored = await restoreWalletNative(recoverNormalized, network);
+          const restored = await restoreWalletNative(recoverNormalized, network, walletPassword);
           if (!restored.ok) {
             toast({ type: "danger", title: "Invalid seed phrase", description: restored.error ?? "Please check your 24 words and try again." });
             return;
@@ -164,7 +186,7 @@ export function Onboarding() {
         <h1 className="t-h1" style={{ marginTop: 8 }}>Save with intent.</h1>
         <p className="t-body" style={{ color: "var(--color-text-secondary)", marginTop: 6 }}>{tagline}</p>
         <p className="onboarding-aside-lead">
-          Non-custodial Zcash savings: your keys stay on this device. Goals stay on-chain with purpose.
+          Non-custodial Zcash wallet: your keys stay on this device and you control all recovery data.
         </p>
 
         <div style={{ marginTop: "auto", display: "flex", flexDirection: "column", gap: 14, paddingTop: 24 }}>
@@ -193,10 +215,18 @@ export function Onboarding() {
         <div className="onboarding-content">
           <div key={step} className="fade-in-up" style={{ width: "100%", maxWidth: 540 }}>
             {step === 0 && <StepWelcome name={name} setName={setName} />}
-            {step === 1 && <StepHabits savings={savings} setSavings={setSavings} stage={stage} setStage={setStage} />}
-            {step === 2 && <StepGoal goal={goal} setGoal={setGoal} />}
-            {step === 3 && <StepWallet walletChoice={walletChoice} setWalletChoice={setWalletChoice} />}
-            {step === 4 && (walletChoice === "create"
+            {step === 1 && (
+              <StepWallet
+                walletChoice={walletChoice}
+                setWalletChoice={setWalletChoice}
+                password={walletPassword}
+                setPassword={setWalletPassword}
+                confirmPassword={walletPasswordConfirm}
+                setConfirmPassword={setWalletPasswordConfirm}
+                passwordValid={passwordValid}
+              />
+            )}
+            {step === 2 && (walletChoice === "create"
               ? <StepSeed
                   seed={seed}
                   verifyIdx={verifyIdx}
@@ -211,6 +241,15 @@ export function Onboarding() {
                   }}
                 />
               : <StepRecover value={recoverPhrase} setValue={setRecoverPhrase} wordCount={recoverWordCount} isValid={recoverValid} />)}
+            {step === 3 && (
+              <StepBackup
+                walletChoice={walletChoice}
+                backupConfirmed={backupConfirmed}
+                setBackupConfirmed={setBackupConfirmed}
+                backupDownloaded={backupDownloaded}
+                onDownload={downloadBackupFile}
+              />
+            )}
           </div>
         </div>
 
@@ -241,97 +280,27 @@ function StepWelcome({ name, setName }: { name: string; setName: (s: string) => 
   );
 }
 
-function StepHabits(p: { savings: SavingsLevel | null; setSavings: (s: SavingsLevel) => void; stage: Stage | null; setStage: (s: Stage) => void }) {
-  const savingsOpts: { v: SavingsLevel; label: string }[] = [
-    { v: "0", label: "$0" }, { v: "<50", label: "Under $50" }, { v: "50-100", label: "$50–$100" }, { v: ">100", label: "Over $100" },
-  ];
-  const stageOpts: { v: Stage; label: string; sub: string }[] = [
-    { v: "starting", label: "Just getting started", sub: "Brand new to saving" },
-    { v: "consistent", label: "Staying consistent", sub: "I save a little every month" },
-    { v: "rebuilding", label: "Rebuilding", sub: "Coming back after a break" },
-    { v: "streak", label: "On a streak", sub: "Saving like a pro" },
-  ];
-  return (
-    <>
-      <h2 className="t-h1">Your starting point.</h2>
-      <p className="t-body text-gray-600" style={{ marginTop: 8 }}>So we can celebrate your wins from day one.</p>
-
-      <div style={{ marginTop: 28 }}>
-        <div className="t-label" style={{ marginBottom: 10 }}>How much do you currently save per month?</div>
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(2, 1fr)", gap: 10 }}>
-          {savingsOpts.map((o) => (
-            <button type="button" key={o.v} onClick={() => p.setSavings(o.v)}
-              className="t-body-med"
-              style={{
-                height: 48, borderRadius: "var(--r-md)",
-                border: p.savings === o.v ? "2px solid var(--coral-400)" : "1px solid " + border,
-                background: p.savings === o.v ? "var(--coral-100)" : surface,
-                color: "var(--color-text-primary)",
-                transition: "all 150ms var(--ease-spring)",
-              }}>{o.label}</button>
-          ))}
-        </div>
-      </div>
-
-      <div style={{ marginTop: 28 }}>
-        <div className="t-label" style={{ marginBottom: 10 }}>Where are you on the savings journey?</div>
-        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-          {stageOpts.map((o) => (
-            <button type="button" key={o.v} onClick={() => p.setStage(o.v)}
-              style={{
-                padding: "14px 16px", borderRadius: "var(--r-md)", textAlign: "left",
-                border: p.stage === o.v ? "2px solid var(--coral-400)" : "1px solid " + border,
-                background: p.stage === o.v ? "var(--coral-100)" : surface,
-                transition: "all 150ms var(--ease-spring)",
-              }}>
-              <div className="t-body-med">{o.label}</div>
-              <div className="t-caption text-gray-400" style={{ marginTop: 2 }}>{o.sub}</div>
-            </button>
-          ))}
-        </div>
-      </div>
-    </>
-  );
-}
-
-function StepGoal({ goal, setGoal }: { goal: GoalCategory | null; setGoal: (g: GoalCategory) => void }) {
-  return (
-    <>
-      <h2 className="t-h1">What is your first goal?</h2>
-      <p className="t-body text-gray-600" style={{ marginTop: 8 }}>This is the warm layer — you can add more vaults later.</p>
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 10, marginTop: 24 }}>
-        {CATEGORIES.map((c) => {
-          const sel = goal === c.id;
-          return (
-            <button type="button" key={c.id} onClick={() => setGoal(c.id)}
-              style={{
-                position: "relative", minHeight: 96, borderRadius: "var(--r-md)",
-                background: sel ? "var(--coral-100)" : surface,
-                border: sel ? "2px solid var(--coral-400)" : "1px solid " + border,
-                display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 8,
-                transform: sel ? "scale(1.02)" : "scale(1)",
-                transition: "all 150ms var(--ease-spring)",
-                boxShadow: sel ? "var(--shadow-gold-glow)" : "none",
-              }}>
-              <span style={{ fontSize: 28 }} aria-hidden="true">{c.emoji}</span>
-              <span className="t-caption" style={{ fontWeight: 600, color: "var(--color-text-primary)" }}>{c.name}</span>
-              {sel && <span style={{
-                position: "absolute", top: 8, right: 8, width: 18, height: 18, borderRadius: 999,
-                background: "var(--coral-400)", color: "#ffffff", display: "grid", placeItems: "center",
-              }}><Icon name="check" size={12} /></span>}
-            </button>
-          );
-        })}
-      </div>
-    </>
-  );
-}
-
-function StepWallet({ walletChoice, setWalletChoice }: { walletChoice: "create" | "recover" | null; setWalletChoice: (s: "create" | "recover") => void }) {
+function StepWallet({
+  walletChoice,
+  setWalletChoice,
+  password,
+  setPassword,
+  confirmPassword,
+  setConfirmPassword,
+  passwordValid,
+}: {
+  walletChoice: "create" | "recover" | null;
+  setWalletChoice: (s: "create" | "recover") => void;
+  password: string;
+  setPassword: (v: string) => void;
+  confirmPassword: string;
+  setConfirmPassword: (v: string) => void;
+  passwordValid: boolean;
+}) {
   return (
     <>
       <h2 className="t-h1">Wallet setup</h2>
-      <p className="t-body text-gray-600" style={{ marginTop: 8 }}>Vault layer: create a new wallet or restore from your existing 24-word seed phrase.</p>
+      <p className="t-body text-gray-600" style={{ marginTop: 8 }}>Create a new wallet or restore from your existing 24-word seed phrase.</p>
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14, marginTop: 28 }}>
         {([
           { v: "create", title: "Create new wallet", sub: "Generate a fresh 24-word seed phrase" },
@@ -349,6 +318,31 @@ function StepWallet({ walletChoice, setWalletChoice }: { walletChoice: "create" 
           </button>
         ))}
       </div>
+      {walletChoice && (
+        <div style={{ marginTop: 20 }}>
+          <label className="label">Wallet password (desktop encryption)</label>
+          <input
+            type="password"
+            className="input"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            placeholder="At least 8 characters"
+          />
+          <label className="label" style={{ marginTop: 10 }}>Confirm password</label>
+          <input
+            type="password"
+            className="input"
+            value={confirmPassword}
+            onChange={(e) => setConfirmPassword(e.target.value)}
+            placeholder="Retype password"
+          />
+          {!passwordValid && (password.length > 0 || confirmPassword.length > 0) && (
+            <div className="t-caption" style={{ marginTop: 8, color: "var(--danger-text)" }}>
+              Password must be at least 8 characters and both entries must match.
+            </div>
+          )}
+        </div>
+      )}
     </>
   );
 }
@@ -391,7 +385,7 @@ function StepSeed(p: {
     <>
       <h2 className="t-h1">Your 24-word seed</h2>
       <p className="t-body text-gray-600" style={{ marginTop: 8 }}>
-        Write these down on paper. In production, this is generated in secure hardware-backed storage, not shown in logs.
+        Write these down now. The next step lets you complete backup and confirm you stored recovery data safely.
       </p>
 
       <div style={{
@@ -438,6 +432,50 @@ function StepSeed(p: {
           </div>
         </div>
       )}
+    </>
+  );
+}
+
+function StepBackup({
+  walletChoice,
+  backupConfirmed,
+  setBackupConfirmed,
+  backupDownloaded,
+  onDownload,
+}: {
+  walletChoice: "create" | "recover" | null;
+  backupConfirmed: boolean;
+  setBackupConfirmed: (v: boolean) => void;
+  backupDownloaded: boolean;
+  onDownload: () => void;
+}) {
+  return (
+    <>
+      <h2 className="t-h1">Backup your wallet</h2>
+      <p className="t-body text-gray-600" style={{ marginTop: 8 }}>
+        Keep your recovery data offline. Anyone with this seed can access your funds.
+      </p>
+      {walletChoice === "create" && (
+        <div style={{ marginTop: 20 }}>
+          <button type="button" className="btn btn-secondary" onClick={onDownload}>
+            Download backup file
+          </button>
+          <div className="t-caption text-gray-400" style={{ marginTop: 8 }}>
+            {backupDownloaded ? "Backup file downloaded. Store it securely and offline." : "Optional: download a local backup file."}
+          </div>
+        </div>
+      )}
+      <label className="hstack gap-10" style={{ marginTop: 20, alignItems: "flex-start" }}>
+        <input
+          type="checkbox"
+          checked={backupConfirmed}
+          onChange={(e) => setBackupConfirmed(e.target.checked)}
+          style={{ marginTop: 2 }}
+        />
+        <span className="t-body">
+          I confirm I have backed up my recovery seed phrase and understand it is required to restore this wallet.
+        </span>
+      </label>
     </>
   );
 }

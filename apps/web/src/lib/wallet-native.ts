@@ -62,9 +62,10 @@ function fallbackSnapshot(mnemonic: string, network: "mainnet" | "testnet"): Nat
   };
 }
 
-export async function createWalletNative(network: "mainnet" | "testnet"): Promise<NativeCreateResponse> {
+export async function createWalletNative(network: "mainnet" | "testnet", password: string): Promise<NativeCreateResponse> {
+  void password;
   if (isTauriRuntime()) {
-    return invokeTauri<NativeCreateResponse>("wallet_create", { network }, 60_000);
+    return invokeTauri<NativeCreateResponse>("wallet_create", { network, password }, 60_000);
   }
   const mnemonicWords = generateWalletMnemonic();
   const snapshot = fallbackSnapshot(mnemonicWords.join(" "), network);
@@ -74,6 +75,7 @@ export async function createWalletNative(network: "mainnet" | "testnet"): Promis
 export async function finalizeCreateWalletNative(
   mnemonic: string,
   network: "mainnet" | "testnet",
+  password: string,
   birthdayHeight?: number,
   draftId?: string,
 ): Promise<NativeOpResponse> {
@@ -85,6 +87,7 @@ export async function finalizeCreateWalletNative(
     return invokeTauri<NativeOpResponse>("wallet_finalize_create", {
       mnemonic: normalized,
       network,
+      password,
       birthdayHeight,
       draftId,
     }, 60_000);
@@ -95,6 +98,7 @@ export async function finalizeCreateWalletNative(
 export async function restoreWalletNative(
   mnemonic: string,
   network: "mainnet" | "testnet",
+  password: string,
   birthdayHeight?: number,
 ): Promise<NativeOpResponse> {
   const normalized = normalizeMnemonic(mnemonic);
@@ -102,7 +106,7 @@ export async function restoreWalletNative(
     return { ok: false, error: "Invalid 24-word BIP39 mnemonic." };
   }
   if (isTauriRuntime()) {
-    return invokeTauri<NativeOpResponse>("wallet_restore", { mnemonic: normalized, network, birthdayHeight }, 60_000);
+    return invokeTauri<NativeOpResponse>("wallet_restore", { mnemonic: normalized, network, password, birthdayHeight }, 60_000);
   }
   return { ok: true, snapshot: fallbackSnapshot(normalized, network) };
 }
