@@ -1,0 +1,13 @@
+{
+  "name": "@zecvault/config",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Shared environment keys, zod schema, and feature flags for all apps",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "import": "./src/index.ts"
+    }
+  }
+}
