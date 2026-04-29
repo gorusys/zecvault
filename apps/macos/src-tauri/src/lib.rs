@@ -205,8 +205,9 @@ fn read_wallet(path: &Path) -> Result<Option<WalletRecord>, String> {
 }
 
 #[tauri::command]
-fn wallet_create(app: tauri::AppHandle, network: String) -> Result<WalletCreateResponse, String> {
+fn wallet_create(app: tauri::AppHandle, network: String, password: String) -> Result<WalletCreateResponse, String> {
     let _ = app;
+    let _ = password;
     let mnemonic = Mnemonic::generate_in(Language::English, 24)
         .map_err(|e| format!("mnemonic generation failed: {}", e))?;
     let normalized = normalize_mnemonic(&mnemonic.to_string());
@@ -223,7 +224,11 @@ fn wallet_finalize_create(
     mnemonic: String,
     network: String,
     birthday_height: Option<u32>,
-) -> Result<WalletOpResponse, String> {
+    draft_id: Option<String>,
+    password: String,
+)-> Result<WalletOpResponse, String> {
+    let _ = draft_id;
+    let _ = password;
     let normalized = normalize_mnemonic(&mnemonic);
     let words = normalized.split(' ').count();
     if words != 24 {
@@ -260,7 +265,11 @@ fn wallet_restore(
     mnemonic: String,
     network: String,
     birthday_height: Option<u32>,
-) -> Result<WalletOpResponse, String> {
+    draft_id: Option<String>,
+    password: String,
+)-> Result<WalletOpResponse, String> {
+    let _ = draft_id;
+    let _ = password;
     let normalized = normalize_mnemonic(&mnemonic);
     let words = normalized.split(' ').count();
     if words != 24 {
