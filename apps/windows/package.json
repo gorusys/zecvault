@@ -1,0 +1,13 @@
+{
+  "name": "@zecvault/windows",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "tauri dev",
+    "tauri:build": "tauri build",
+    "tauri:build:msi": "tauri build -b msi"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.10.1"
+  }
+}
