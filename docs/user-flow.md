@@ -8,14 +8,13 @@ flowchart TD
     B -->|Yes| C[Onboarding Step 1\nName]
     B -->|No| H[Dashboard]
 
-    C --> D[Step 2\nSavings habits]
-    D --> E[Step 3\nFirst goal category]
-    E --> F[Step 4\nWallet choice\nCreate or Recover]
-    F --> G{Create wallet?}
-    G -->|Create| G1[Step 5\nSeed phrase reveal + verify]
-    G -->|Recover| G2[Step 5\nEnter seed phrase]
-    G1 --> H
-    G2 --> H
+    C --> D[Step 2\nWallet choice + password\nCreate or Recover]
+    D --> E{Create wallet?}
+    E -->|Create| F[Step 3\nSeed phrase reveal + verify]
+    E -->|Recover| G[Step 3\nEnter seed phrase]
+    F --> H1[Step 4\nBackup confirmation]
+    G --> H1[Step 4\nBackup confirmation]
+    H1 --> H
 
     H --> I[Vaults List]
     H --> J[Send]
