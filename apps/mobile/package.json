@@ -1,0 +1,9 @@
+{
+  "name": "@zecvault/mobile",
+  "version": "0.0.0",
+  "private": true,
+  "description": "React Native / Expo or Flutter mobile; shares packages/shared with web",
+  "scripts": {
+    "scaffold": "node -e \"console.log('Expo: npx create-expo-app@latest .  — or use apps/ios and apps/android with Tauri mobile. See README.')\""
+  }
+}

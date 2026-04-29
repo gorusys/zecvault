@@ -1,0 +1,9 @@
+{
+  "name": "@zecvault/ios",
+  "version": "0.0.0",
+  "private": true,
+  "description": "iOS shell: Tauri (mobile), Capacitor, or native; native projects land here or in apps/desktop with Tauri",
+  "scripts": {
+    "note": "node -e \"console.log('iOS: see README.md. Primary option is Tauri mobile in apps/desktop or npx @capacitor/create-app .')\""
+  }
+}

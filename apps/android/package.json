@@ -1,0 +1,9 @@
+{
+  "name": "@zecvault/android",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Android shell: Tauri (mobile), Capacitor, or native; Gradle project lands here or under Tauri",
+  "scripts": {
+    "note": "node -e \"console.log('Android: see README.md. Tauri mobile or: npx cap add android from web build.')\""
+  }
+}

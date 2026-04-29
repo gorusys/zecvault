@@ -1,0 +1,10 @@
+{
+  "name": "@zecvault/pwa",
+  "version": "0.0.0",
+  "private": true,
+  "description": "PWA: manifest, icons, and service worker wiring around the main web app",
+  "scripts": {
+    "build": "npm run build -w @zecvault/web",
+    "dev": "npm run dev -w @zecvault/web"
+  }
+}

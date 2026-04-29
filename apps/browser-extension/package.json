@@ -1,0 +1,10 @@
+{
+  "name": "@zecvault/browser-extension",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Chromium, Firefox, Edge, Safari (Web Ext) — WXT, Plasmo, or Vite+CRX",
+  "scripts": {
+    "dev": "node -e \"console.log('Scaffold: npx wxt@latest init .  or  npx plasmo init  — see README')\"",
+    "build": "node -e \"console.log('Add WXT/Plasmo build here after init'); process.exit(0)\""
+  }
+}
