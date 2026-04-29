@@ -1,8 +1,9 @@
-import { useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { CATEGORIES, type GoalCategory } from "@/lib/categories";
 import { tagline } from "@/lib/tokens";
-import { generateMockSeed } from "@/lib/zec";
-import { useSettings } from "@/stores";
+import { isValidWalletMnemonic, normalizeMnemonic } from "@/lib/zec";
+import { createWalletNative, restoreWalletNative, type NativeWalletSnapshot } from "@/lib/wallet-native";
+import { useSettings, useWalletStore } from "@/stores";
 import { Icon } from "@/components/Icon";
 import { toast } from "@/stores/toast";
 
@@ -16,13 +17,21 @@ const border = "var(--color-border)";
 
 export function Onboarding() {
   const completeOnboarding = useSettings((s) => s.completeOnboarding);
+  const network = useSettings((s) => s.network);
+  const applyWalletSnapshot = useWalletStore((s) => s.applyWalletSnapshot);
   const [step, setStep] = useState(0);
   const [name, setName] = useState("");
   const [savings, setSavings] = useState<SavingsLevel | null>(null);
   const [stage, setStage] = useState<Stage | null>(null);
   const [goal, setGoal] = useState<GoalCategory | null>(null);
   const [walletChoice, setWalletChoice] = useState<"create" | "recover" | null>(null);
-  const seed = useMemo(() => generateMockSeed(), []);
+  const [seed, setSeed] = useState<string[]>([]);
+  const [seedLoading, setSeedLoading] = useState(false);
+  const [createdSnapshot, setCreatedSnapshot] = useState<NativeWalletSnapshot | null>(null);
+  const [recoverPhrase, setRecoverPhrase] = useState("");
+  const recoverNormalized = normalizeMnemonic(recoverPhrase);
+  const recoverWordCount = recoverNormalized ? recoverNormalized.split(" ").length : 0;
+  const recoverValid = isValidWalletMnemonic(recoverNormalized);
   const [verifyIdx] = useState(() => {
     const set = new Set<number>();
     while (set.size < 4) set.add(Math.floor(Math.random() * 24));
@@ -31,17 +40,59 @@ export function Onboarding() {
   const [verifyVals, setVerifyVals] = useState<Record<number, string>>({});
   const allVerified = verifyIdx.every((i) => verifyVals[i]?.trim().toLowerCase() === seed[i]);
 
+  useEffect(() => {
+    if (step !== 4 || walletChoice !== "create" || createdSnapshot || seedLoading) return;
+    let ignore = false;
+    const loadSeed = async () => {
+      try {
+        setSeedLoading(true);
+        const created = await createWalletNative(network);
+        if (ignore) return;
+        setSeed(created.mnemonicWords);
+        setCreatedSnapshot(created.snapshot);
+      } catch {
+        if (!ignore) {
+          toast({ type: "error", title: "Wallet setup failed", description: "Could not generate wallet seed. Please try again." });
+        }
+      } finally {
+        if (!ignore) setSeedLoading(false);
+      }
+    };
+    void loadSeed();
+    return () => {
+      ignore = true;
+    };
+  }, [createdSnapshot, network, seedLoading, step, walletChoice]);
+
   const canContinue =
     step === 0 ? name.trim().length > 0 :
     step === 1 ? savings !== null && stage !== null :
     step === 2 ? goal !== null :
     step === 3 ? walletChoice !== null :
-    step === 4 ? walletChoice === "recover" || allVerified :
+    step === 4 ? walletChoice === "recover" ? recoverValid : allVerified && !seedLoading :
     false;
 
-  function next() {
+  async function next() {
     if (!canContinue) return;
     if (step === STEPS.length - 1) {
+      if (walletChoice === "create") {
+        if (!createdSnapshot) {
+          toast({ type: "error", title: "Wallet setup incomplete", description: "Seed phrase generation is still in progress." });
+          return;
+        }
+        applyWalletSnapshot(createdSnapshot);
+      } else {
+        const restored = await restoreWalletNative(recoverNormalized, network);
+        if (!restored.ok) {
+          toast({ type: "error", title: "Invalid seed phrase", description: restored.error ?? "Please check your 24 words and try again." });
+          return;
+        }
+        if (!restored.snapshot) {
+          toast({ type: "error", title: "Restore failed", description: "Wallet state was not returned by the wallet backend." });
+          return;
+        }
+        applyWalletSnapshot(restored.snapshot);
+      }
       completeOnboarding(name.trim());
       toast({ type: "success", title: "Welcome to ZecVault", description: "Your non-custodial wallet is ready. " + tagline });
       return;
@@ -103,8 +154,8 @@ export function Onboarding() {
             {step === 2 && <StepGoal goal={goal} setGoal={setGoal} />}
             {step === 3 && <StepWallet walletChoice={walletChoice} setWalletChoice={setWalletChoice} />}
             {step === 4 && (walletChoice === "create"
-              ? <StepSeed seed={seed} verifyIdx={verifyIdx} verifyVals={verifyVals} setVerifyVals={setVerifyVals} allVerified={allVerified} />
-              : <StepRecover />)}
+              ? <StepSeed seed={seed} verifyIdx={verifyIdx} verifyVals={verifyVals} setVerifyVals={setVerifyVals} allVerified={allVerified} isLoading={seedLoading} />
+              : <StepRecover value={recoverPhrase} setValue={setRecoverPhrase} wordCount={recoverWordCount} isValid={recoverValid} />)}
           </div>
         </div>
 
@@ -225,7 +276,7 @@ function StepWallet({ walletChoice, setWalletChoice }: { walletChoice: "create" 
   return (
     <>
       <h2 className="t-h1">Wallet setup</h2>
-      <p className="t-body text-gray-600" style={{ marginTop: 8 }}>Vault layer: create a new wallet or restore. Keys never leave this device (demo uses mock data).</p>
+      <p className="t-body text-gray-600" style={{ marginTop: 8 }}>Vault layer: create a new wallet or restore from your existing 24-word seed phrase.</p>
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14, marginTop: 28 }}>
         {([
           { v: "create", title: "Create new wallet", sub: "Generate a fresh 24-word seed phrase" },
@@ -247,8 +298,18 @@ function StepWallet({ walletChoice, setWalletChoice }: { walletChoice: "create" 
   );
 }
 
-function StepSeed(p: { seed: string[]; verifyIdx: number[]; verifyVals: Record<number, string>; setVerifyVals: (r: Record<number, string>) => void; allVerified: boolean }) {
+function StepSeed(p: { seed: string[]; verifyIdx: number[]; verifyVals: Record<number, string>; setVerifyVals: (r: Record<number, string>) => void; allVerified: boolean; isLoading: boolean }) {
   const [revealed, setRevealed] = useState(false);
+  if (p.isLoading) {
+    return (
+      <>
+        <h2 className="t-h1">Preparing your wallet seed...</h2>
+        <p className="t-body text-gray-600" style={{ marginTop: 8 }}>
+          Generating a secure mnemonic in the native wallet backend.
+        </p>
+      </>
+    );
+  }
   return (
     <>
       <h2 className="t-h1">Your 24-word seed</h2>
@@ -304,16 +365,20 @@ function StepSeed(p: { seed: string[]; verifyIdx: number[]; verifyVals: Record<n
   );
 }
 
-function StepRecover() {
-  const [val, setVal] = useState("");
+function StepRecover({ value, setValue, wordCount, isValid }: { value: string; setValue: (v: string) => void; wordCount: number; isValid: boolean }) {
   return (
     <>
       <h2 className="t-h1">Restore your wallet</h2>
       <p className="t-body text-gray-600" style={{ marginTop: 8 }}>Type or paste your 24 words, separated by spaces.</p>
-      <textarea className="input mono" style={{ minHeight: 160, marginTop: 20 }} value={val} onChange={(e) => setVal(e.target.value)} placeholder="abandon ability able about above..." />
+      <textarea className="input mono" style={{ minHeight: 160, marginTop: 20 }} value={value} onChange={(e) => setValue(e.target.value)} placeholder="abandon ability able about above..." />
       <div className="t-caption text-gray-400" style={{ marginTop: 8 }}>
-        {val.trim().split(/\s+/).filter(Boolean).length}/24 words
+        {wordCount}/24 words
       </div>
+      {wordCount > 0 && !isValid && (
+        <div className="t-caption" style={{ marginTop: 8, color: "var(--danger-text)" }}>
+          Enter a valid 24-word BIP39 seed phrase.
+        </div>
+      )}
     </>
   );
 }

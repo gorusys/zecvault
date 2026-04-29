@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 import appCss from "../styles.css?url";
 import { Sidebar } from "@/components/Sidebar";
 import { ToastStack } from "@/components/ToastStack";
+import { getWalletStateNative } from "@/lib/wallet-native";
 import { Onboarding } from "@/screens/Onboarding";
 import { useSettings, useVaultStore, useWalletStore } from "@/stores";
 
@@ -55,14 +56,29 @@ function RootShell({ children }: { children: React.ReactNode }) {
 function AppShell() {
   const onboardingComplete = useSettings((s) => s.onboardingComplete);
   const ensureSeeded = useVaultStore((s) => s.ensureSeeded);
-  const initialize = useWalletStore((s) => s.initialize);
+  const applyWalletSnapshot = useWalletStore((s) => s.applyWalletSnapshot);
   const [mounted, setMounted] = useState(false);
 
   useEffect(() => {
-    initialize();
-    ensureSeeded();
-    setMounted(true);
-  }, [initialize, ensureSeeded]);
+    let ignore = false;
+    const bootstrap = async () => {
+      try {
+        const nativeState = await getWalletStateNative();
+        if (!ignore && nativeState.ok && nativeState.snapshot) {
+          applyWalletSnapshot(nativeState.snapshot);
+        }
+      } finally {
+        if (!ignore) {
+          ensureSeeded();
+          setMounted(true);
+        }
+      }
+    };
+    void bootstrap();
+    return () => {
+      ignore = true;
+    };
+  }, [applyWalletSnapshot, ensureSeeded]);
 
   if (!mounted) return null;
 

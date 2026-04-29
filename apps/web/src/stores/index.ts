@@ -1,7 +1,15 @@
 import { create } from "zustand";
 import { persist, createJSONStorage } from "zustand/middleware";
 import type { GoalCategory } from "@/lib/categories";
-import { mockUnifiedAddress, mockTxId } from "@/lib/zec";
+import type { NativeWalletSnapshot } from "@/lib/wallet-native";
+import {
+  deriveWalletAddresses,
+  isValidWalletMnemonic,
+  mockTxId,
+  mockUnifiedAddress,
+  normalizeMnemonic,
+  walletFingerprint,
+} from "@/lib/zec";
 
 // ---------- Types ----------
 export type SyncStatus = "synced" | "syncing" | "error";
@@ -45,6 +53,9 @@ export interface Vault {
 // ---------- Wallet store ----------
 interface WalletState {
   isInitialized: boolean;
+  walletFingerprint: string;
+  createdAtTs: number | null;
+  birthdayHeight: number | null;
   syncStatus: SyncStatus;
   syncProgress: number; // 0..100
   syncBlock: number;
@@ -57,8 +68,10 @@ interface WalletState {
   txHistory: TxRecord[];
   zecUsdPrice: number;
   priceChange24h: number;
-  initialize: () => void;
   reset: () => void;
+  applyWalletSnapshot: (snapshot: NativeWalletSnapshot) => void;
+  createWalletFromMnemonic: (mnemonic: string, network: "mainnet" | "testnet") => void;
+  restoreWalletFromMnemonic: (mnemonic: string, network: "mainnet" | "testnet") => { ok: boolean; error?: string };
   addTx: (tx: TxRecord) => void;
   setSyncStatus: (s: SyncStatus) => void;
 }
@@ -80,11 +93,14 @@ export const useWalletStore = create<WalletState>()(
   persist(
     (set, get) => ({
       isInitialized: false,
+      walletFingerprint: "",
+      createdAtTs: null,
+      birthdayHeight: null,
       syncStatus: "synced",
       syncProgress: 100,
       syncBlock: 2_341_120,
-      totalZat: 412_5000_000,
-      spendableZat: 304_2500_000,
+      totalZat: 0,
+      spendableZat: 0,
       pendingZat: 0,
       unifiedAddress: "",
       saplingAddress: "",
@@ -92,20 +108,58 @@ export const useWalletStore = create<WalletState>()(
       txHistory: [],
       zecUsdPrice: 32.41,
       priceChange24h: 2.4,
-      initialize: () => {
-        if (get().isInitialized) return;
-        const unified = mockUnifiedAddress("zecvault-main", 0);
-        const sapling = "zs1" + mockUnifiedAddress("sap", 0).slice(2, 78);
-        const transparent = "t1" + mockUnifiedAddress("tr", 0).slice(2, 34);
+      reset: () => set({
+        isInitialized: false,
+        walletFingerprint: "",
+        createdAtTs: null,
+        birthdayHeight: null,
+        totalZat: 0,
+        spendableZat: 0,
+        pendingZat: 0,
+        unifiedAddress: "",
+        saplingAddress: "",
+        transparentAddress: "",
+        txHistory: [],
+      }),
+      applyWalletSnapshot: (snapshot) => set({
+        isInitialized: true,
+        walletFingerprint: snapshot.walletFingerprint,
+        createdAtTs: snapshot.createdAtTs * 1000,
+        birthdayHeight: snapshot.birthdayHeight,
+        unifiedAddress: snapshot.unifiedAddress,
+        saplingAddress: snapshot.saplingAddress,
+        transparentAddress: snapshot.transparentAddress,
+        txHistory: [],
+        totalZat: 0,
+        spendableZat: 0,
+        pendingZat: 0,
+      }),
+      createWalletFromMnemonic: (mnemonic, network) => {
+        const normalized = normalizeMnemonic(mnemonic);
+        const addresses = deriveWalletAddresses(normalized, network);
+        const now = Date.now();
         set({
           isInitialized: true,
-          unifiedAddress: unified,
-          saplingAddress: sapling,
-          transparentAddress: transparent,
-          txHistory: seedTxHistory(unified),
+          walletFingerprint: walletFingerprint(normalized),
+          createdAtTs: now,
+          birthdayHeight: network === "testnet" ? 280_000 : 419_200,
+          unifiedAddress: addresses.unifiedAddress,
+          saplingAddress: addresses.saplingAddress,
+          transparentAddress: addresses.transparentAddress,
+          txHistory: [],
+          totalZat: 0,
+          spendableZat: 0,
+          pendingZat: 0,
         });
       },
-      reset: () => set({ isInitialized: false, txHistory: [] }),
+      restoreWalletFromMnemonic: (mnemonic, network) => {
+        const normalized = normalizeMnemonic(mnemonic);
+        if (!isValidWalletMnemonic(normalized)) {
+          return { ok: false, error: "Invalid 24-word BIP39 mnemonic." };
+        }
+        get().createWalletFromMnemonic(normalized, network);
+        return { ok: true };
+      },
       addTx: (tx) => set({ txHistory: [tx, ...get().txHistory] }),
       setSyncStatus: (s) => set({ syncStatus: s }),
     }),
