@@ -3,12 +3,15 @@ import { useWalletStore } from "@/stores";
 import { fmtZec, zecToZat } from "@/lib/zec";
 import { Icon } from "@/components/Icon";
 import { toast } from "@/stores/toast";
+import { useWallet } from "@/hooks/useWallet";
 
 export function Send() {
   const { spendableZat, zecUsdPrice } = useWalletStore();
   const [addr, setAddr] = useState("");
   const [amt, setAmt] = useState("");
   const [memo, setMemo] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const walletApi = useWallet();
 
   const addrType = addr.startsWith("u1") ? { label: "Shielded (UA)", style: "pill-info" } :
                    addr.startsWith("zs1") ? { label: "Sapling", style: "pill-success" } :
@@ -16,9 +19,26 @@ export function Send() {
 
   const max = Number(spendableZat) / 1e8;
 
-  function handleSend() {
+  async function handleSend() {
     if (!addr || !amt) return;
-    toast({ type: "success", title: "Transaction broadcast", description: `${amt} ZEC sent.` });
+    if (!addr.startsWith("u1") && !addr.startsWith("zs1") && !addr.startsWith("t1")) {
+      toast({ type: "error", title: "Invalid address", description: "Use a valid unified, sapling, or transparent address." });
+      return;
+    }
+    if (addr.startsWith("t1")) {
+      toast({ type: "error", title: "Transparent warning", description: "Transparent addresses reduce privacy. Prefer unified addresses (u1...)." });
+      return;
+    }
+    setSubmitting(true);
+    try {
+      const txid = await walletApi.sendZec(addr.trim(), zecToZat(Number(amt)), memo.trim() || undefined);
+      toast({ type: "success", title: "Transaction broadcast", description: `TxID: ${txid}` });
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : "Could not broadcast transaction.";
+      toast({ type: "error", title: "Send failed", description: detail });
+    } finally {
+      setSubmitting(false);
+    }
     setAddr(""); setAmt(""); setMemo("");
   }
 
@@ -53,7 +73,7 @@ export function Send() {
           <span className="t-mono">0.0001 ZEC</span>
         </div>
 
-        <button className="btn btn-primary btn-lg btn-block" style={{ marginTop: 24 }} onClick={handleSend} disabled={!addr || !amt}>
+        <button className="btn btn-primary btn-lg btn-block" style={{ marginTop: 24 }} onClick={() => void handleSend()} disabled={!addr || !amt || submitting}>
           Send <Icon name="arrow-up-right" size={16} />
         </button>
       </div>

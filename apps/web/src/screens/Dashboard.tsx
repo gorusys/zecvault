@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useSettings, useVaultStore, useWalletStore } from "@/stores";
 import { fmtZec, fmtFiat, formatRelativeTime, truncateAddress } from "@/lib/zec";
 import { categoryOf } from "@/lib/categories";
@@ -7,12 +7,16 @@ import { Icon } from "@/components/Icon";
 import { VaultCard } from "@/components/VaultCard";
 import { NewVaultDrawer } from "./NewVaultDrawer";
 import { Link } from "@tanstack/react-router";
+import { useWallet } from "@/hooks/useWallet";
 
 export function Dashboard() {
   const userName = useSettings((s) => s.userName);
   const { totalZat, spendableZat, zecUsdPrice, priceChange24h, txHistory, syncStatus } = useWalletStore();
+  const setSyncStatus = useWalletStore((s) => s.setSyncStatus);
   const vaults = useVaultStore((s) => s.vaults);
   const [showNewVault, setShowNewVault] = useState(false);
+  const [syncPct, setSyncPct] = useState(100);
+  const walletApi = useWallet();
 
   const lockedZat = useMemo(() => vaults.reduce((acc, v) => acc + v.currentBalanceZat, 0), [vaults]);
   const recentTx = txHistory.slice(0, 6);
@@ -20,6 +24,22 @@ export function Dashboard() {
     const h = new Date().getHours();
     return h < 12 ? "Good morning" : h < 18 ? "Good afternoon" : "Good evening";
   }, []);
+
+  useEffect(() => {
+    let dispose = () => {};
+    void walletApi.startSync(
+      (progress) => {
+        const pct = progress.total > 0 ? Math.round((progress.height / progress.total) * 100) : 0;
+        setSyncPct(pct);
+        setSyncStatus(pct >= 100 ? "synced" : "syncing");
+      },
+      undefined,
+      () => setSyncStatus("synced"),
+    ).then((fn) => {
+      dispose = fn;
+    });
+    return () => dispose();
+  }, [setSyncStatus]);
 
   return (
     <div className="fade-in">
@@ -34,6 +54,21 @@ export function Dashboard() {
           {syncStatus === "synced" ? "Fully synced" : syncStatus === "syncing" ? "Syncing…" : "Sync error"}
         </span>
       </div>
+      {syncStatus === "syncing" && (
+        <div style={{ marginBottom: 16 }}>
+          <div style={{ height: 6, width: "100%", background: "var(--gray-100)", borderRadius: 999 }}>
+            <div
+              style={{
+                height: "100%",
+                width: `${syncPct}%`,
+                borderRadius: 999,
+                background: "var(--coral-400)",
+                transition: "width 200ms ease",
+              }}
+            />
+          </div>
+        </div>
+      )}
 
       {/* Portfolio card */}
       <div className="card card-pad" style={{ marginBottom: 28 }}>

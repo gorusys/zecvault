@@ -1,10 +1,12 @@
 import { useSettings, useVaultStore, useWalletStore } from "@/stores";
 import { toast } from "@/stores/toast";
+import { useWallet } from "@/hooks/useWallet";
 
 export function Settings() {
   const s = useSettings();
   const vaults = useVaultStore((v) => v.vaults);
   const wallet = useWalletStore();
+  const walletApi = useWallet();
 
   return (
     <div className="fade-in" style={{ maxWidth: 800 }}>
@@ -33,7 +35,21 @@ export function Settings() {
               ))}
             </div>
           </Row>
-          <button className="btn btn-secondary btn-block" style={{ marginTop: 12 }} onClick={() => toast({ type: "success", title: "Connected", description: "Latency: 84ms" })}>Test connection</button>
+          <button
+            className="btn btn-secondary btn-block"
+            style={{ marginTop: 12 }}
+            onClick={async () => {
+              try {
+                const ok = await walletApi.setLightwalletdServer(s.lightwalletdEndpoint);
+                toast({ type: ok ? "success" : "error", title: ok ? "Connected" : "Connection failed", description: ok ? "Server configured for sync." : "Could not configure lightwalletd endpoint." });
+              } catch (error) {
+                const detail = error instanceof Error ? error.message : "Could not configure endpoint.";
+                toast({ type: "error", title: "Connection failed", description: detail });
+              }
+            }}
+          >
+            Test connection
+          </button>
         </Card>
 
         <Card title="Backup">

@@ -1,25 +1,33 @@
-import { useEffect, useRef, useState } from "react";
-import QRCode from "qrcode";
+import { useEffect, useState } from "react";
+import { QRCodeSVG } from "qrcode.react";
 import { useWalletStore } from "@/stores";
 import { Icon } from "@/components/Icon";
 import { toast } from "@/stores/toast";
+import { useWallet } from "@/hooks/useWallet";
 
 export function Receive() {
   const { unifiedAddress, saplingAddress, transparentAddress } = useWalletStore();
+  const applyWalletSnapshot = useWalletStore((s) => s.applyWalletSnapshot);
+  const walletApi = useWallet();
   const [type, setType] = useState<"unified" | "sapling" | "transparent">("unified");
   const addr = type === "unified" ? unifiedAddress : type === "sapling" ? saplingAddress : transparentAddress;
-  const canvasRef = useRef<HTMLCanvasElement>(null);
   const [copied, setCopied] = useState(false);
 
   useEffect(() => {
-    if (canvasRef.current && addr) {
-      QRCode.toCanvas(canvasRef.current, addr, {
-        width: 220,
-        margin: 2,
-        color: { dark: "#1A1A18", light: "#FFFFFF" },
+    if (unifiedAddress) return;
+    void walletApi.getAddress().then((ua) => {
+      if (!ua) return;
+      applyWalletSnapshot({
+        network: "mainnet",
+        walletFingerprint: "",
+        unifiedAddress: ua,
+        saplingAddress: saplingAddress || "",
+        transparentAddress: transparentAddress || "",
+        createdAtTs: Math.floor(Date.now() / 1000),
+        birthdayHeight: 419_200,
       });
-    }
-  }, [addr]);
+    });
+  }, [applyWalletSnapshot, saplingAddress, transparentAddress, unifiedAddress]);
 
   function copy() {
     navigator.clipboard?.writeText(addr);
@@ -45,7 +53,7 @@ export function Receive() {
         </div>
         <div style={{ display: "flex", justifyContent: "center", marginBottom: 4 }}>
           <div style={{ padding: 10, background: "#fff", border: "1px solid var(--gray-100)", borderRadius: "var(--r-md)" }}>
-            <canvas ref={canvasRef} style={{ display: "block", margin: "0 auto", borderRadius: "var(--r-sm)" }} />
+            <QRCodeSVG value={addr || "u1"} size={220} marginSize={2} bgColor="#FFFFFF" fgColor="#1A1A18" />
           </div>
         </div>
         <h3 className="t-h3" style={{ marginTop: 16 }}>Your Zcash address</h3>
