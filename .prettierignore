@@ -1,0 +1,10 @@
+node_modules
+dist
+.output
+.vinxi
+pnpm-lock.yaml
+package-lock.json
+apps/web/src/routeTree.gen.ts
+**/target
+release
+apps/windows/**/gen
