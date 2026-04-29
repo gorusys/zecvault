@@ -30,6 +30,8 @@ aes-gcm = "0.10"
 tonic = { version = "0.12", features = ["tls"] }
 prost = "0.13"
 tokio = { version = "1", features = ["full"] }
+base64 = "0.22"
+rand = "0.8"
 log = "0.4"
 tauri = { version = "2.10.3", features = [] }
 tauri-plugin-log = "2"

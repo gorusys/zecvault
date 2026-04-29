@@ -116,10 +116,12 @@ version = "0.1.0"
 dependencies = [
  "aes-gcm",
  "argon2",
+ "base64 0.22.1",
  "bip39",
  "keyring",
  "log",
  "prost 0.13.5",
+ "rand 0.8.6",
  "serde",
  "serde_json",
  "tauri",

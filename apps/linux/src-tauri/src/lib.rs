@@ -1,5 +1,11 @@
 //! Tauri desktop shell: in release, load bundled frontend assets directly.
+use aes_gcm::aead::Aead;
+use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
+use argon2::Argon2;
+use base64::engine::general_purpose::STANDARD as B64;
+use base64::Engine as _;
 use bip39::{Language, Mnemonic};
+use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -13,7 +19,14 @@ use zip32::AccountId;
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 struct WalletRecord {
-    mnemonic: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    mnemonic: Option<String>,
+    #[serde(default)]
+    mnemonic_ciphertext_b64: String,
+    #[serde(default)]
+    mnemonic_salt_b64: String,
+    #[serde(default)]
+    mnemonic_nonce_b64: String,
     network: String,
     wallet_fingerprint: String,
     unified_address: String,
@@ -120,6 +133,33 @@ fn deterministic_hex(input: &str, len: usize) -> String {
     out
 }
 
+fn validate_password(password: &str) -> Result<(), String> {
+    if password.trim().len() < 8 {
+        return Err("Password must be at least 8 characters.".to_string());
+    }
+    Ok(())
+}
+
+fn encrypt_mnemonic(mnemonic: &str, password: &str) -> Result<(String, String, String), String> {
+    validate_password(password)?;
+    let mut salt = [0u8; 16];
+    let mut nonce = [0u8; 12];
+    rand::rngs::OsRng.fill_bytes(&mut salt);
+    rand::rngs::OsRng.fill_bytes(&mut nonce);
+
+    let mut key = [0u8; 32];
+    Argon2::default()
+        .hash_password_into(password.as_bytes(), &salt, &mut key)
+        .map_err(|e| format!("password KDF failed: {}", e))?;
+
+    let cipher = Aes256Gcm::new_from_slice(&key).map_err(|e| format!("cipher init failed: {}", e))?;
+    let ciphertext = cipher
+        .encrypt(Nonce::from_slice(&nonce), mnemonic.as_bytes())
+        .map_err(|e| format!("seed encryption failed: {}", e))?;
+
+    Ok((B64.encode(ciphertext), B64.encode(salt), B64.encode(nonce)))
+}
+
 fn derive_real_addresses(normalized_mnemonic: &str, network: &str) -> Result<(String, String, String), String> {
     let seed = Mnemonic::parse_in_normalized(Language::English, normalized_mnemonic)
         .map_err(|e| format!("mnemonic parse failed: {}", e))?
@@ -201,7 +241,12 @@ fn build_preview_snapshot(normalized_mnemonic: &str, network: &str, birthday_hei
     }
 }
 
-fn build_record(normalized_mnemonic: &str, network: &str, birthday_height: u32) -> WalletRecord {
+fn build_record(
+    normalized_mnemonic: &str,
+    network: &str,
+    birthday_height: u32,
+    password: &str,
+) -> Result<WalletRecord, String> {
     let (unified_address, sapling_address, transparent_address) =
         derive_real_addresses(normalized_mnemonic, network).unwrap_or_else(|_| {
             let suffix = deterministic_hex(&format!("{}|{}", network, normalized_mnemonic), 76);
@@ -212,8 +257,13 @@ fn build_record(normalized_mnemonic: &str, network: &str, birthday_height: u32) 
                 format!("t1{}", transparent_suffix),
             )
         });
-    WalletRecord {
-        mnemonic: normalized_mnemonic.to_string(),
+    let (mnemonic_ciphertext_b64, mnemonic_salt_b64, mnemonic_nonce_b64) =
+        encrypt_mnemonic(normalized_mnemonic, password)?;
+    Ok(WalletRecord {
+        mnemonic: None,
+        mnemonic_ciphertext_b64,
+        mnemonic_salt_b64,
+        mnemonic_nonce_b64,
         network: network.to_string(),
         wallet_fingerprint: deterministic_hex(&format!("fp|{}", normalized_mnemonic), 16),
         unified_address,
@@ -221,7 +271,7 @@ fn build_record(normalized_mnemonic: &str, network: &str, birthday_height: u32) 
         transparent_address,
         created_at_ts: now_unix_ts(),
         birthday_height,
-    }
+    })
 }
 
 fn wallet_file(app: &tauri::AppHandle) -> Result<PathBuf, String> {
@@ -302,10 +352,15 @@ fn lightwalletd_file(app: &tauri::AppHandle) -> Result<PathBuf, String> {
 }
 
 #[tauri::command]
-fn wallet_create(app: tauri::AppHandle, network: String) -> Result<WalletCreateResponse, String> {
+fn wallet_create(
+    app: tauri::AppHandle,
+    network: String,
+    password: String,
+) -> Result<WalletCreateResponse, String> {
     if network != "mainnet" && network != "testnet" {
         return Err("Unsupported network. Use mainnet or testnet.".to_string());
     }
+    validate_password(&password)?;
     let mnemonic = Mnemonic::generate_in(Language::English, 24)
         .map_err(|e| format!("mnemonic generation failed: {}", e))?;
     let normalized = normalize_mnemonic(&mnemonic.to_string());
@@ -341,6 +396,7 @@ fn wallet_finalize_create(
     network: String,
     birthday_height: Option<u32>,
     draft_id: Option<String>,
+    password: String,
 ) -> Result<WalletOpResponse, String> {
     if network != "mainnet" && network != "testnet" {
         return Err("Unsupported network. Use mainnet or testnet.".to_string());
@@ -385,7 +441,8 @@ fn wallet_finalize_create(
         &normalized,
         &network,
         birthday_height.unwrap_or_else(|| default_birthday_height(&network)),
-    );
+        &password,
+    )?;
     write_wallet(&path, &record)?;
     if draft_path.exists() {
         let _ = fs::remove_file(&draft_path);
@@ -403,6 +460,7 @@ fn wallet_restore(
     mnemonic: String,
     network: String,
     birthday_height: Option<u32>,
+    password: String,
 ) -> Result<WalletOpResponse, String> {
     if network != "mainnet" && network != "testnet" {
         return Err("Unsupported network. Use mainnet or testnet.".to_string());
@@ -428,7 +486,8 @@ fn wallet_restore(
         &normalized,
         &network,
         birthday_height.unwrap_or_else(|| default_birthday_height(&network)),
-    );
+        &password,
+    )?;
     write_wallet(&path, &record)?;
     let draft_path = wallet_create_draft_file(&app)?;
     if draft_path.exists() {
