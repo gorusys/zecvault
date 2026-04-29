@@ -206,18 +206,51 @@ fn read_wallet(path: &Path) -> Result<Option<WalletRecord>, String> {
 
 #[tauri::command]
 fn wallet_create(app: tauri::AppHandle, network: String) -> Result<WalletCreateResponse, String> {
-    let path = wallet_file(&app)?;
-    if path.exists() {
-        return Err("Wallet already exists on this device. Reset before creating a new one.".to_string());
-    }
+    let _ = app;
     let mnemonic = Mnemonic::generate_in(Language::English, 24)
         .map_err(|e| format!("mnemonic generation failed: {}", e))?;
     let normalized = normalize_mnemonic(&mnemonic.to_string());
     let record = build_record(&normalized, &network, default_birthday_height(&network));
-    write_wallet(&path, &record)?;
     Ok(WalletCreateResponse {
         mnemonic_words: normalized.split(' ').map(String::from).collect(),
         snapshot: to_public_snapshot(&record),
+    })
+}
+
+#[tauri::command]
+fn wallet_finalize_create(
+    app: tauri::AppHandle,
+    mnemonic: String,
+    network: String,
+    birthday_height: Option<u32>,
+) -> Result<WalletOpResponse, String> {
+    let normalized = normalize_mnemonic(&mnemonic);
+    let words = normalized.split(' ').count();
+    if words != 24 {
+        return Ok(WalletOpResponse {
+            ok: false,
+            snapshot: None,
+            error: Some("Invalid seed phrase: expected 24 words.".to_string()),
+        });
+    }
+    if Mnemonic::parse_in_normalized(Language::English, &normalized).is_err() {
+        return Ok(WalletOpResponse {
+            ok: false,
+            snapshot: None,
+            error: Some("Invalid seed phrase: checksum or words are incorrect.".to_string()),
+        });
+    }
+    let path = wallet_file(&app)?;
+    let record = build_record(
+        &normalized,
+        &network,
+        birthday_height.unwrap_or_else(|| default_birthday_height(&network)),
+    );
+    write_wallet(&path, &record)?;
+    Ok(WalletOpResponse {
+        ok: true,
+        snapshot: Some(to_public_snapshot(&record)),
+        error: None,
     })
 }
 
@@ -293,6 +326,7 @@ pub fn run() {
         )
         .invoke_handler(tauri::generate_handler![
             wallet_create,
+            wallet_finalize_create,
             wallet_restore,
             wallet_get_state,
             wallet_reset

@@ -6,7 +6,7 @@ authors = ["you"]
 license = ""
 repository = ""
 edition = "2021"
-rust-version = "1.77.2"
+rust-version = "1.85.1"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -24,7 +24,15 @@ bip39 = { version = "2.2.0", features = ["rand"] }
 zcash_keys = { version = "0.13.0", features = ["orchard", "sapling", "transparent-inputs"] }
 zcash_protocol = "0.8.0"
 zip32 = "0.2.1"
+keyring = { version = "3", features = ["apple-native", "windows-native", "linux-native"] }
+argon2 = "0.5"
+aes-gcm = "0.10"
+tonic = { version = "0.12", features = ["tls"] }
+prost = "0.13"
+tokio = { version = "1", features = ["full"] }
 log = "0.4"
 tauri = { version = "2.10.3", features = [] }
 tauri-plugin-log = "2"
 tauri-plugin-store = "2"
+zcash_client_sqlite = { version = "0.20.0", features = ["orchard"] }
+zcash_client_backend = { version = "0.22.0", features = ["orchard", "sync", "lightwalletd-tonic"] }
