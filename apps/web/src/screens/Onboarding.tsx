@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { CATEGORIES, type GoalCategory } from "@/lib/categories";
 import { tagline } from "@/lib/tokens";
 import { isValidWalletMnemonic, normalizeMnemonic } from "@/lib/zec";
-import { createWalletNative, restoreWalletNative, type NativeWalletSnapshot } from "@/lib/wallet-native";
+import { createWalletNative, finalizeCreateWalletNative, restoreWalletNative, type NativeWalletSnapshot } from "@/lib/wallet-native";
 import { useSettings, useWalletStore } from "@/stores";
 import { Icon } from "@/components/Icon";
 import { toast } from "@/stores/toast";
@@ -27,7 +27,11 @@ export function Onboarding() {
   const [walletChoice, setWalletChoice] = useState<"create" | "recover" | null>(null);
   const [seed, setSeed] = useState<string[]>([]);
   const [seedLoading, setSeedLoading] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const [seedError, setSeedError] = useState<string | null>(null);
+  const [seedRetryToken, setSeedRetryToken] = useState(0);
   const [createdSnapshot, setCreatedSnapshot] = useState<NativeWalletSnapshot | null>(null);
+  const [createdDraftId, setCreatedDraftId] = useState<string | undefined>(undefined);
   const [recoverPhrase, setRecoverPhrase] = useState("");
   const recoverNormalized = normalizeMnemonic(recoverPhrase);
   const recoverWordCount = recoverNormalized ? recoverNormalized.split(" ").length : 0;
@@ -41,18 +45,34 @@ export function Onboarding() {
   const allVerified = verifyIdx.every((i) => verifyVals[i]?.trim().toLowerCase() === seed[i]);
 
   useEffect(() => {
-    if (step !== 4 || walletChoice !== "create" || createdSnapshot || seedLoading) return;
+    if (walletChoice === "create") return;
+    setSeed([]);
+    setCreatedSnapshot(null);
+    setCreatedDraftId(undefined);
+    setSeedError(null);
+    setVerifyVals({});
+  }, [walletChoice]);
+
+  useEffect(() => {
+    if (step !== 4 || walletChoice !== "create" || createdSnapshot || seedLoading || seedError) return;
     let ignore = false;
     const loadSeed = async () => {
       try {
         setSeedLoading(true);
+        setSeedError(null);
         const created = await createWalletNative(network);
         if (ignore) return;
         setSeed(created.mnemonicWords);
         setCreatedSnapshot(created.snapshot);
-      } catch {
+        setCreatedDraftId(created.draftId);
+      } catch (error) {
         if (!ignore) {
-          toast({ type: "error", title: "Wallet setup failed", description: "Could not generate wallet seed. Please try again." });
+          const detail = error instanceof Error ? error.message : "Could not generate wallet seed. Please try again.";
+          setSeed([]);
+          setCreatedSnapshot(null);
+          setCreatedDraftId(undefined);
+          setSeedError(detail);
+          toast({ type: "danger", title: "Wallet setup failed", description: detail });
         }
       } finally {
         if (!ignore) setSeedLoading(false);
@@ -62,36 +82,59 @@ export function Onboarding() {
     return () => {
       ignore = true;
     };
-  }, [createdSnapshot, network, seedLoading, step, walletChoice]);
+  }, [createdSnapshot, network, seedError, seedLoading, step, walletChoice, seedRetryToken]);
 
   const canContinue =
     step === 0 ? name.trim().length > 0 :
     step === 1 ? savings !== null && stage !== null :
     step === 2 ? goal !== null :
     step === 3 ? walletChoice !== null :
-    step === 4 ? walletChoice === "recover" ? recoverValid : allVerified && !seedLoading :
+    step === 4 ? walletChoice === "recover" ? recoverValid : seed.length === 24 && allVerified && !seedLoading :
     false;
 
   async function next() {
-    if (!canContinue) return;
+    if (!canContinue || submitting) return;
     if (step === STEPS.length - 1) {
       if (walletChoice === "create") {
         if (!createdSnapshot) {
-          toast({ type: "error", title: "Wallet setup incomplete", description: "Seed phrase generation is still in progress." });
+          toast({ type: "danger", title: "Wallet setup incomplete", description: "Seed phrase generation is still in progress." });
           return;
         }
-        applyWalletSnapshot(createdSnapshot);
+        try {
+          setSubmitting(true);
+          const finalized = await finalizeCreateWalletNative(seed.join(" "), network, undefined, createdDraftId);
+          if (!finalized.ok || !finalized.snapshot) {
+            toast({ type: "danger", title: "Wallet creation failed", description: finalized.error ?? "Could not finalize wallet creation." });
+            return;
+          }
+          applyWalletSnapshot(finalized.snapshot);
+        } catch (error) {
+          const detail = error instanceof Error ? error.message : "Could not finalize wallet creation.";
+          toast({ type: "danger", title: "Wallet creation failed", description: detail });
+          return;
+        } finally {
+          setSubmitting(false);
+        }
       } else {
-        const restored = await restoreWalletNative(recoverNormalized, network);
-        if (!restored.ok) {
-          toast({ type: "error", title: "Invalid seed phrase", description: restored.error ?? "Please check your 24 words and try again." });
+        try {
+          setSubmitting(true);
+          const restored = await restoreWalletNative(recoverNormalized, network);
+          if (!restored.ok) {
+            toast({ type: "danger", title: "Invalid seed phrase", description: restored.error ?? "Please check your 24 words and try again." });
+            return;
+          }
+          if (!restored.snapshot) {
+            toast({ type: "danger", title: "Restore failed", description: "Wallet state was not returned by the wallet backend." });
+            return;
+          }
+          applyWalletSnapshot(restored.snapshot);
+        } catch (error) {
+          const detail = error instanceof Error ? error.message : "Native restore failed unexpectedly.";
+          toast({ type: "danger", title: "Restore failed", description: detail });
           return;
+        } finally {
+          setSubmitting(false);
         }
-        if (!restored.snapshot) {
-          toast({ type: "error", title: "Restore failed", description: "Wallet state was not returned by the wallet backend." });
-          return;
-        }
-        applyWalletSnapshot(restored.snapshot);
       }
       completeOnboarding(name.trim());
       toast({ type: "success", title: "Welcome to ZecVault", description: "Your non-custodial wallet is ready. " + tagline });
@@ -154,7 +197,19 @@ export function Onboarding() {
             {step === 2 && <StepGoal goal={goal} setGoal={setGoal} />}
             {step === 3 && <StepWallet walletChoice={walletChoice} setWalletChoice={setWalletChoice} />}
             {step === 4 && (walletChoice === "create"
-              ? <StepSeed seed={seed} verifyIdx={verifyIdx} verifyVals={verifyVals} setVerifyVals={setVerifyVals} allVerified={allVerified} isLoading={seedLoading} />
+              ? <StepSeed
+                  seed={seed}
+                  verifyIdx={verifyIdx}
+                  verifyVals={verifyVals}
+                  setVerifyVals={setVerifyVals}
+                  allVerified={allVerified}
+                  isLoading={seedLoading}
+                  error={seedError}
+                  onRetry={() => {
+                    setSeedError(null);
+                    setSeedRetryToken((n) => n + 1);
+                  }}
+                />
               : <StepRecover value={recoverPhrase} setValue={setRecoverPhrase} wordCount={recoverWordCount} isValid={recoverValid} />)}
           </div>
         </div>
@@ -164,8 +219,8 @@ export function Onboarding() {
             Back
           </button>
           <div className="t-caption text-gray-400">Step {step + 1} of {STEPS.length}</div>
-          <button type="button" className="btn btn-primary btn-lg" disabled={!canContinue} onClick={next}>
-            {step === STEPS.length - 1 ? "Enter ZecVault" : "Continue"}
+          <button type="button" className="btn btn-primary btn-lg" disabled={!canContinue || submitting} onClick={next}>
+            {submitting ? "Please wait..." : step === STEPS.length - 1 ? "Enter ZecVault" : "Continue"}
           </button>
         </div>
       </div>
@@ -298,7 +353,16 @@ function StepWallet({ walletChoice, setWalletChoice }: { walletChoice: "create" 
   );
 }
 
-function StepSeed(p: { seed: string[]; verifyIdx: number[]; verifyVals: Record<number, string>; setVerifyVals: (r: Record<number, string>) => void; allVerified: boolean; isLoading: boolean }) {
+function StepSeed(p: {
+  seed: string[];
+  verifyIdx: number[];
+  verifyVals: Record<number, string>;
+  setVerifyVals: (r: Record<number, string>) => void;
+  allVerified: boolean;
+  isLoading: boolean;
+  error: string | null;
+  onRetry: () => void;
+}) {
   const [revealed, setRevealed] = useState(false);
   if (p.isLoading) {
     return (
@@ -307,6 +371,19 @@ function StepSeed(p: { seed: string[]; verifyIdx: number[]; verifyVals: Record<n
         <p className="t-body text-gray-600" style={{ marginTop: 8 }}>
           Generating a secure mnemonic in the native wallet backend.
         </p>
+      </>
+    );
+  }
+  if (p.error && p.seed.length === 0) {
+    return (
+      <>
+        <h2 className="t-h1">Wallet seed generation failed</h2>
+        <p className="t-body text-gray-600" style={{ marginTop: 8 }}>
+          {p.error}
+        </p>
+        <button type="button" className="btn btn-primary" style={{ marginTop: 16 }} onClick={p.onRetry}>
+          Retry seed generation
+        </button>
       </>
     );
   }
