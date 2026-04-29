@@ -5,7 +5,7 @@ import { Sidebar } from "@/components/Sidebar";
 import { ToastStack } from "@/components/ToastStack";
 import { getWalletStateNative } from "@/lib/wallet-native";
 import { Onboarding } from "@/screens/Onboarding";
-import { useSettings, useVaultStore, useWalletStore } from "@/stores";
+import { useSettings, useWalletStore } from "@/stores";
 
 function NotFoundComponent() {
   return (
@@ -55,7 +55,6 @@ function RootShell({ children }: { children: React.ReactNode }) {
 
 function AppShell() {
   const onboardingComplete = useSettings((s) => s.onboardingComplete);
-  const ensureSeeded = useVaultStore((s) => s.ensureSeeded);
   const applyWalletSnapshot = useWalletStore((s) => s.applyWalletSnapshot);
   const [mounted, setMounted] = useState(false);
 
@@ -69,7 +68,6 @@ function AppShell() {
         }
       } finally {
         if (!ignore) {
-          ensureSeeded();
           setMounted(true);
         }
       }
@@ -78,7 +76,7 @@ function AppShell() {
     return () => {
       ignore = true;
     };
-  }, [applyWalletSnapshot, ensureSeeded]);
+  }, [applyWalletSnapshot]);
 
   if (!mounted) return null;
 
