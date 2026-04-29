@@ -19,6 +19,7 @@ export interface NativeWalletSnapshot {
 interface NativeCreateResponse {
   mnemonicWords: string[];
   snapshot: NativeWalletSnapshot;
+  draftId?: string;
 }
 
 interface NativeOpResponse {
@@ -31,9 +32,20 @@ function isTauriRuntime() {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 }
 
-async function invokeTauri<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
+async function invokeTauri<T>(cmd: string, args?: Record<string, unknown>, timeoutMs = 15_000): Promise<T> {
   const mod = await import("@tauri-apps/api/core");
-  return mod.invoke<T>(cmd, args);
+  try {
+    const result = await Promise.race([
+      mod.invoke<T>(cmd, args),
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error(`Timed out after ${timeoutMs}ms`)), timeoutMs),
+      ),
+    ]);
+    return result;
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new Error(`${cmd} failed: ${detail}`);
+  }
 }
 
 function fallbackSnapshot(mnemonic: string, network: "mainnet" | "testnet"): NativeWalletSnapshot {
@@ -52,11 +64,32 @@ function fallbackSnapshot(mnemonic: string, network: "mainnet" | "testnet"): Nat
 
 export async function createWalletNative(network: "mainnet" | "testnet"): Promise<NativeCreateResponse> {
   if (isTauriRuntime()) {
-    return invokeTauri<NativeCreateResponse>("wallet_create", { network });
+    return invokeTauri<NativeCreateResponse>("wallet_create", { network }, 60_000);
   }
   const mnemonicWords = generateWalletMnemonic();
   const snapshot = fallbackSnapshot(mnemonicWords.join(" "), network);
-  return { mnemonicWords, snapshot };
+  return { mnemonicWords, snapshot, draftId: undefined };
+}
+
+export async function finalizeCreateWalletNative(
+  mnemonic: string,
+  network: "mainnet" | "testnet",
+  birthdayHeight?: number,
+  draftId?: string,
+): Promise<NativeOpResponse> {
+  const normalized = normalizeMnemonic(mnemonic);
+  if (!isValidWalletMnemonic(normalized)) {
+    return { ok: false, error: "Invalid 24-word BIP39 mnemonic." };
+  }
+  if (isTauriRuntime()) {
+    return invokeTauri<NativeOpResponse>("wallet_finalize_create", {
+      mnemonic: normalized,
+      network,
+      birthdayHeight,
+      draftId,
+    }, 60_000);
+  }
+  return { ok: true, snapshot: fallbackSnapshot(normalized, network) };
 }
 
 export async function restoreWalletNative(
@@ -69,7 +102,7 @@ export async function restoreWalletNative(
     return { ok: false, error: "Invalid 24-word BIP39 mnemonic." };
   }
   if (isTauriRuntime()) {
-    return invokeTauri<NativeOpResponse>("wallet_restore", { mnemonic: normalized, network, birthdayHeight });
+    return invokeTauri<NativeOpResponse>("wallet_restore", { mnemonic: normalized, network, birthdayHeight }, 60_000);
   }
   return { ok: true, snapshot: fallbackSnapshot(normalized, network) };
 }
