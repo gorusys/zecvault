@@ -1,0 +1,21 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "enables the default permissions",
+  "windows": [
+    "main"
+  ],
+  "remote": {
+    "urls": [
+      "http://127.0.0.1:5173/*",
+      "http://127.0.0.1:19876/*",
+      "http://127.0.0.1/*",
+      "http://localhost/*"
+    ]
+  },
+  "permissions": [
+    "core:default",
+    "store:default",
+    "log:default"
+  ]
+}
