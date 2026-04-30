@@ -7,13 +7,18 @@ interface NavDef { to: string; icon: IconName; label: string; section: "Main" | 
 export function Sidebar() {
   const { location } = useRouterState();
   const vaults = useVaultStore((s) => s.vaults);
+  const activeWalletFingerprint = useWalletStore((s) => s.activeWalletFingerprint);
+  const fallbackWalletFingerprint = useWalletStore((s) => s.walletFingerprint);
   const syncStatus = useWalletStore((s) => s.syncStatus);
   const syncBlock = useWalletStore((s) => s.syncBlock);
+  const activeVaultCount = vaults.filter(
+    (v) => (v.walletFingerprint || (activeWalletFingerprint || fallbackWalletFingerprint)) === (activeWalletFingerprint || fallbackWalletFingerprint),
+  ).length;
 
   const items: NavDef[] = [
     { to: "/", icon: "home", label: "Dashboard", section: "Main" },
     { to: "/wallets" as const, icon: "wallet", label: "Wallets", section: "Main" },
-    { to: "/vaults" as const, icon: "vault", label: "Vaults", section: "Main", badge: vaults.length || undefined },
+    { to: "/vaults" as const, icon: "vault", label: "Vaults", section: "Main", badge: activeVaultCount || undefined },
     { to: "/send" as const, icon: "send", label: "Send", section: "Main" },
     { to: "/receive" as const, icon: "receive", label: "Receive", section: "Main" },
     { to: "/history" as const, icon: "history", label: "History", section: "Main" },

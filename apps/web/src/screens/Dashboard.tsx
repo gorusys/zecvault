@@ -14,12 +14,11 @@ export function Dashboard() {
   const { totalZat, spendableZat, zecUsdPrice, priceChange24h, txHistory, syncStatus, unifiedAddress, saplingAddress, transparentAddress, wallets, activeWalletFingerprint, walletFingerprint } = useWalletStore();
   const setSyncStatus = useWalletStore((s) => s.setSyncStatus);
   const vaults = useVaultStore((s) => s.vaults);
+  const archive = useVaultStore((s) => s.archive);
   const [showNewVault, setShowNewVault] = useState(false);
   const [syncPct, setSyncPct] = useState(100);
   const walletApi = useWallet();
 
-  const lockedZat = useMemo(() => vaults.reduce((acc, v) => acc + v.currentBalanceZat, 0), [vaults]);
-  const recentTx = txHistory.slice(0, 6);
   const greeting = useMemo(() => {
     const h = new Date().getHours();
     return h < 12 ? "Good morning" : h < 18 ? "Good afternoon" : "Good evening";
@@ -29,6 +28,24 @@ export function Dashboard() {
     [wallets, activeWalletFingerprint, walletFingerprint],
   );
   const activeWalletName = activeWallet?.walletName?.trim() || "Active wallet";
+  const activeWalletKey = activeWalletFingerprint || walletFingerprint;
+  const activeWalletVaults = useMemo(
+    () => vaults.filter((v) => (v.walletFingerprint || activeWalletKey) === activeWalletKey),
+    [vaults, activeWalletKey],
+  );
+  const activeWalletAllVaults = useMemo(
+    () => [...vaults, ...archive].filter((v) => (v.walletFingerprint || activeWalletKey) === activeWalletKey),
+    [vaults, archive, activeWalletKey],
+  );
+  const activeWalletTx = useMemo(
+    () => txHistory.filter((tx) => !tx.walletFingerprint || tx.walletFingerprint === activeWalletKey),
+    [txHistory, activeWalletKey],
+  );
+  const lockedZat = useMemo(
+    () => activeWalletVaults.reduce((acc, v) => acc + v.currentBalanceZat, 0),
+    [activeWalletVaults],
+  );
+  const recentTx = activeWalletTx.slice(0, 6);
 
   useEffect(() => {
     let dispose = () => {};
@@ -110,14 +127,14 @@ export function Dashboard() {
       <div className="hstack between" style={{ marginBottom: 14 }}>
         <div className="hstack gap-10">
           <h2 className="t-h3">Active vaults</h2>
-          <span className="pill pill-coral">{vaults.length}</span>
+          <span className="pill pill-coral">{activeWalletVaults.length}</span>
         </div>
         <button className="btn btn-ghost" onClick={() => setShowNewVault(true)}>
           <Icon name="plus" size={16} /> New vault
         </button>
       </div>
 
-      {vaults.length === 0 ? (
+      {activeWalletVaults.length === 0 ? (
         <div className="card card-pad" style={{ textAlign: "center", padding: 48 }}>
           <div style={{ fontSize: 48 }}>🎯</div>
           <h3 className="t-h3" style={{ marginTop: 12 }}>No active vaults yet</h3>
@@ -128,7 +145,7 @@ export function Dashboard() {
         </div>
       ) : (
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))", gap: 14 }}>
-          {vaults.map((v, i) => <VaultCard key={v.id} vault={v} animateDelay={i * 80} />)}
+          {activeWalletVaults.map((v, i) => <VaultCard key={v.id} vault={v} animateDelay={i * 80} />)}
         </div>
       )}
 
@@ -143,7 +160,7 @@ export function Dashboard() {
         ) : recentTx.map((tx) => {
           const isReceived = tx.type === "received";
           const isVault = tx.type.startsWith("vault");
-          const vault = isVault ? vaults.find((v) => v.id === tx.vaultId) : null;
+          const vault = isVault ? activeWalletAllVaults.find((v) => v.id === tx.vaultId) : null;
           const cat = vault ? categoryOf(vault.category) : null;
           const amountColor = isReceived ? "var(--success-strong)" : isVault ? "#4FA3E3" : "var(--coral-400)";
           return (

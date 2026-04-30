@@ -18,6 +18,7 @@ export interface TxRecord {
   id: string;
   type: "received" | "sent" | "vault-deposit" | "vault-withdraw";
   amountZat: number; // signed (received +, sent -)
+  walletFingerprint?: string;
   toAddress?: string;
   fromAddress?: string;
   memo?: string;
@@ -33,6 +34,7 @@ export type VaultStatus = "active" | "complete" | "breaking" | "archived";
 
 export interface Vault {
   id: string;
+  walletFingerprint: string;
   category: GoalCategory;
   goalName: string;
   targetZat: number;
@@ -207,8 +209,10 @@ export const useWalletStore = create<WalletState>()(
 interface VaultState {
   vaults: Vault[];
   archive: Vault[];
-  createVault: (input: { category: GoalCategory; goalName: string; targetZat: number; deadlineTs: number; }) => Vault;
+  createVault: (input: { walletFingerprint: string; category: GoalCategory; goalName: string; targetZat: number; deadlineTs: number; }) => Vault;
   deposit: (id: string, amountZat: number) => void;
+  getVaultsForWallet: (walletFingerprint: string) => Vault[];
+  getArchiveForWallet: (walletFingerprint: string) => Vault[];
   completeVault: (id: string) => void;
   requestBreak: (id: string) => void;
   cancelBreak: (id: string) => void;
@@ -221,13 +225,14 @@ export const useVaultStore = create<VaultState>()(
     (set, get) => ({
       vaults: [],
       archive: [],
-      createVault: ({ category, goalName, targetZat, deadlineTs }) => {
+      createVault: ({ walletFingerprint, category, goalName, targetZat, deadlineTs }) => {
         const idx = get().vaults.length + get().archive.length + 1;
         const v: Vault = {
           id: "v" + idx + "_" + Date.now().toString(36),
+          walletFingerprint,
           category, goalName, targetZat, deadlineTs,
           createdTs: Date.now(),
-          shieldedAddress: mockUnifiedAddress("vault-" + category, idx),
+          shieldedAddress: mockUnifiedAddress(`${walletFingerprint}|vault-${category}`, idx),
           derivationIndex: idx,
           currentBalanceZat: 0,
           contributions: [],
@@ -246,6 +251,8 @@ export const useVaultStore = create<VaultState>()(
           ? { ...v, currentBalanceZat: v.currentBalanceZat + amountZat, lastContributionTs: Date.now(), streakDays: v.streakDays + 1 }
           : v),
       }),
+      getVaultsForWallet: (walletFingerprint) => get().vaults.filter((v) => (v.walletFingerprint || walletFingerprint) === walletFingerprint),
+      getArchiveForWallet: (walletFingerprint) => get().archive.filter((v) => (v.walletFingerprint || walletFingerprint) === walletFingerprint),
       completeVault: (id) => set({
         vaults: get().vaults.map((v) => v.id === id ? { ...v, status: "complete" as const } : v),
       }),
