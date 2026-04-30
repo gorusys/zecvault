@@ -80,6 +80,8 @@ interface WalletState {
   restoreWalletFromMnemonic: (mnemonic: string, network: "mainnet" | "testnet") => { ok: boolean; error?: string };
   addTx: (tx: TxRecord) => void;
   setSyncStatus: (s: SyncStatus) => void;
+  setSyncMetrics: (input: { syncProgress: number; syncBlock: number }) => void;
+  setBalances: (input: { totalZat: number; spendableZat: number; pendingZat: number }) => void;
 }
 
 export const useWalletStore = create<WalletState>()(
@@ -200,6 +202,15 @@ export const useWalletStore = create<WalletState>()(
       },
       addTx: (tx) => set({ txHistory: [tx, ...get().txHistory] }),
       setSyncStatus: (s) => set({ syncStatus: s }),
+      setSyncMetrics: ({ syncProgress, syncBlock }) => set({
+        syncProgress,
+        syncBlock,
+      }),
+      setBalances: ({ totalZat, spendableZat, pendingZat }) => set({
+        totalZat,
+        spendableZat,
+        pendingZat,
+      }),
     }),
     { name: "zecvault-wallet", storage: createJSONStorage(() => localStorage) },
   ),

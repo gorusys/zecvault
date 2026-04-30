@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import { useSettings, useVaultStore, useWalletStore } from "@/stores";
 import { fmtZec, fmtFiat, formatRelativeTime, truncateAddress } from "@/lib/zec";
 import { categoryOf } from "@/lib/categories";
@@ -7,17 +7,13 @@ import { Icon } from "@/components/Icon";
 import { VaultCard } from "@/components/VaultCard";
 import { NewVaultDrawer } from "./NewVaultDrawer";
 import { Link } from "@tanstack/react-router";
-import { useWallet } from "@/hooks/useWallet";
 
 export function Dashboard() {
   const userName = useSettings((s) => s.userName);
-  const { totalZat, spendableZat, zecUsdPrice, priceChange24h, txHistory, syncStatus, unifiedAddress, saplingAddress, transparentAddress, wallets, activeWalletFingerprint, walletFingerprint } = useWalletStore();
-  const setSyncStatus = useWalletStore((s) => s.setSyncStatus);
+  const { totalZat, spendableZat, zecUsdPrice, priceChange24h, txHistory, syncStatus, syncProgress, unifiedAddress, saplingAddress, transparentAddress, wallets, activeWalletFingerprint, walletFingerprint } = useWalletStore();
   const vaults = useVaultStore((s) => s.vaults);
   const archive = useVaultStore((s) => s.archive);
   const [showNewVault, setShowNewVault] = useState(false);
-  const [syncPct, setSyncPct] = useState(100);
-  const walletApi = useWallet();
 
   const greeting = useMemo(() => {
     const h = new Date().getHours();
@@ -46,22 +42,6 @@ export function Dashboard() {
     [activeWalletVaults],
   );
   const recentTx = activeWalletTx.slice(0, 6);
-
-  useEffect(() => {
-    let dispose = () => {};
-    void walletApi.startSync(
-      (progress) => {
-        const pct = progress.total > 0 ? Math.round((progress.height / progress.total) * 100) : 0;
-        setSyncPct(pct);
-        setSyncStatus(pct >= 100 ? "synced" : "syncing");
-      },
-      undefined,
-      () => setSyncStatus("synced"),
-    ).then((fn) => {
-      dispose = fn;
-    });
-    return () => dispose();
-  }, [setSyncStatus]);
 
   return (
     <div className="fade-in">
@@ -93,7 +73,7 @@ export function Dashboard() {
             <div
               style={{
                 height: "100%",
-                width: `${syncPct}%`,
+                width: `${syncProgress}%`,
                 borderRadius: 999,
                 background: "var(--coral-400)",
                 transition: "width 200ms ease",

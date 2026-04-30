@@ -22,6 +22,11 @@ interface SyncProgressPayload {
   total: number;
 }
 
+interface SyncCompletePayload {
+  ok?: boolean;
+  error?: string;
+}
+
 function isTauriRuntime() {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 }
@@ -50,12 +55,12 @@ export function useWallet() {
   async function startSync(
     onProgress?: (progress: SyncProgressPayload) => void,
     onBalanceUpdated?: () => void,
-    onComplete?: () => void,
+    onComplete?: (payload?: SyncCompletePayload) => void,
   ) {
     if (!isTauriRuntime()) return () => {};
     const unlistenProgress = await listen<SyncProgressPayload>("sync-progress", (event) => onProgress?.(event.payload));
     const unlistenBalance = await listen("balance-updated", () => onBalanceUpdated?.());
-    const unlistenComplete = await listen("sync-complete", () => onComplete?.());
+    const unlistenComplete = await listen<SyncCompletePayload>("sync-complete", (event) => onComplete?.(event.payload));
     await invoke("start_sync");
     return () => {
       unlistenProgress();
