@@ -39,6 +39,43 @@ export interface NativeAppLockState {
   locked: boolean;
 }
 
+export interface NativeWalletBackupExport {
+  walletFingerprint: string;
+  walletName: string;
+  network: "mainnet" | "testnet";
+  mnemonic: string;
+}
+
+export async function saveTextFileWithDialogNative(suggestedFileName: string, content: string): Promise<string> {
+  if (isTauriRuntime()) {
+    const [{ save }, { writeTextFile }] = await Promise.all([
+      import("@tauri-apps/plugin-dialog"),
+      import("@tauri-apps/plugin-fs"),
+    ]);
+    const selected = await save({
+      defaultPath: suggestedFileName,
+      filters: [{ name: "Text", extensions: ["txt"] }],
+    });
+    const selectedPath = Array.isArray(selected) ? selected[0] : selected;
+    if (!selectedPath) {
+      throw new Error("Save canceled.");
+    }
+    await writeTextFile(selectedPath, content);
+    return selectedPath;
+  }
+
+  const blob = new Blob([content], { type: "text/plain;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = suggestedFileName;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+  return suggestedFileName;
+}
+
 function isTauriRuntime() {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 }
@@ -215,6 +252,20 @@ export async function removeWalletNative(walletFingerprint: string): Promise<Nat
     }
   }
   return { ok: false, error: "Native runtime unavailable." };
+}
+
+export async function exportWalletBackupNative(walletFingerprint: string): Promise<NativeWalletBackupExport> {
+  if (isTauriRuntime()) {
+    return invokeTauri<NativeWalletBackupExport>("wallet_export_backup", { walletFingerprint }, 30_000);
+  }
+  throw new Error("Native runtime unavailable.");
+}
+
+export async function exportAllWalletBackupsNative(): Promise<NativeWalletBackupExport[]> {
+  if (isTauriRuntime()) {
+    return invokeTauri<NativeWalletBackupExport[]>("wallet_export_all_backups", undefined, 60_000);
+  }
+  throw new Error("Native runtime unavailable.");
 }
 
 export async function resetWalletNative(): Promise<NativeOpResponse> {

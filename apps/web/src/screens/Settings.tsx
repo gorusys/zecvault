@@ -1,7 +1,7 @@
 import { useSettings, useVaultStore, useWalletStore } from "@/stores";
 import { toast } from "@/stores/toast";
 import { useWallet } from "@/hooks/useWallet";
-import { lockAppNative } from "@/lib/wallet-native";
+import { exportAllWalletBackupsNative, lockAppNative, saveTextFileWithDialogNative } from "@/lib/wallet-native";
 
 export function Settings() {
   const s = useSettings();
@@ -34,7 +34,6 @@ export function Settings() {
           >
             Lock app now
           </button>
-          <button className="btn btn-secondary btn-block" style={{ marginTop: 12 }}>View seed phrase</button>
         </Card>
 
         <Card title="Network">
@@ -69,7 +68,52 @@ export function Settings() {
 
         <Card title="Backup">
           <p className="t-body text-gray-600">Your 24-word seed phrase is the only way to recover your wallet. Keep it offline.</p>
-          <button className="btn btn-secondary btn-block" style={{ marginTop: 16 }}>View seed phrase</button>
+          <button
+            className="btn btn-secondary btn-block"
+            style={{ marginTop: 16 }}
+            onClick={async () => {
+              try {
+                const backups = await exportAllWalletBackupsNative();
+                if (backups.length === 0) {
+                  toast({ type: "danger", title: "No wallets found", description: "No wallets available to back up." });
+                  return;
+                }
+                const content = [
+                  "ZecVault All Wallets Backup",
+                  `Exported At: ${new Date().toISOString()}`,
+                  `Wallet Count: ${backups.length}`,
+                  "",
+                  ...backups.flatMap((b, idx) => ([
+                    `--- Wallet ${idx + 1} ---`,
+                    `Wallet Name: ${b.walletName || b.walletFingerprint}`,
+                    `Wallet Fingerprint: ${b.walletFingerprint}`,
+                    `Network: ${b.network}`,
+                    `Seed Phrase: ${b.mnemonic}`,
+                    "",
+                  ])),
+                  "Keep this file offline and encrypted. Anyone with these seeds can spend your funds.",
+                ].join("\n");
+                const savedPath = await saveTextFileWithDialogNative(
+                  `zecvault-all-wallets-backup-${Date.now()}.txt`,
+                  content,
+                );
+                toast({
+                  type: "success",
+                  title: "All wallets backup downloaded",
+                  description: `Saved to: ${savedPath}`,
+                });
+              } catch (error) {
+                const detail = error instanceof Error ? error.message : "Could not export all wallets backup.";
+                if (detail === "Save canceled.") {
+                  toast({ type: "warning", title: "Backup save canceled" });
+                  return;
+                }
+                toast({ type: "danger", title: "Backup failed", description: detail });
+              }
+            }}
+          >
+            Download all wallets backup
+          </button>
         </Card>
 
         <Card title="Display">

@@ -1,9 +1,11 @@
 import { useEffect, useState } from "react";
 import { Link, useNavigate } from "@tanstack/react-router";
 import {
+  exportWalletBackupNative,
   listWalletsNative,
   removeWalletNative,
   renameWalletNative,
+  saveTextFileWithDialogNative,
 } from "@/lib/wallet-native";
 import { useWalletStore } from "@/stores";
 import { toast } from "@/stores/toast";
@@ -17,6 +19,7 @@ export function WalletDetail({ walletId }: { walletId: string }) {
 
   const [walletName, setWalletName] = useState(wallet?.walletName ?? "");
   const [renameBusy, setRenameBusy] = useState(false);
+  const [backupBusy, setBackupBusy] = useState(false);
   const [removeBusy, setRemoveBusy] = useState(false);
 
   useEffect(() => {
@@ -83,6 +86,56 @@ export function WalletDetail({ walletId }: { walletId: string }) {
           }}
         >
           {renameBusy ? "Saving..." : "Save name"}
+        </button>
+      </div>
+
+      <div className="card card-pad" style={{ marginBottom: 14 }}>
+        <h3 className="t-h3" style={{ marginBottom: 10 }}>Backup</h3>
+        <p className="t-body text-gray-600">
+          Download this wallet recovery backup. Keep it offline and secure.
+        </p>
+        <button
+          className="btn btn-secondary"
+          style={{ marginTop: 10 }}
+          disabled={backupBusy}
+          onClick={async () => {
+            try {
+              setBackupBusy(true);
+              const backup = await exportWalletBackupNative(wallet.walletFingerprint);
+              const safeName = (backup.walletName || backup.walletFingerprint).replace(/[^a-zA-Z0-9_-]+/g, "-");
+              const content = [
+                "ZecVault Wallet Backup",
+                `Exported At: ${new Date().toISOString()}`,
+                `Wallet Name: ${backup.walletName || backup.walletFingerprint}`,
+                `Wallet Fingerprint: ${backup.walletFingerprint}`,
+                `Network: ${backup.network}`,
+                "",
+                `Seed Phrase: ${backup.mnemonic}`,
+                "",
+                "Keep this file offline and encrypted. Anyone with this seed can spend your funds.",
+              ].join("\n");
+              const savedPath = await saveTextFileWithDialogNative(
+                `zecvault-wallet-backup-${safeName}-${Date.now()}.txt`,
+                content,
+              );
+              toast({
+                type: "success",
+                title: "Wallet backup downloaded",
+                description: `Saved to: ${savedPath}`,
+              });
+            } catch (error) {
+              const detail = error instanceof Error ? error.message : "Could not export wallet backup.";
+              if (detail === "Save canceled.") {
+                toast({ type: "warning", title: "Backup save canceled" });
+                return;
+              }
+              toast({ type: "danger", title: "Backup failed", description: detail });
+            } finally {
+              setBackupBusy(false);
+            }
+          }}
+        >
+          {backupBusy ? "Preparing backup..." : "Download wallet backup"}
         </button>
       </div>
 
