@@ -18,6 +18,7 @@ import { Route as ReceiveRouteImport } from './routes/receive'
 import { Route as HistoryRouteImport } from './routes/history'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as WalletsIndexRouteImport } from './routes/wallets.index'
+import { Route as VaultsIndexRouteImport } from './routes/vaults.index'
 import { Route as WalletsWalletIdRouteImport } from './routes/wallets.$walletId'
 import { Route as VaultsVaultIdRouteImport } from './routes/vaults.$vaultId'
 
@@ -66,6 +67,11 @@ const WalletsIndexRoute = WalletsIndexRouteImport.update({
   path: '/',
   getParentRoute: () => WalletsRoute,
 } as any)
+const VaultsIndexRoute = VaultsIndexRouteImport.update({
+  id: '/',
+  path: '/',
+  getParentRoute: () => VaultsRoute,
+} as any)
 const WalletsWalletIdRoute = WalletsWalletIdRouteImport.update({
   id: '/$walletId',
   path: '/$walletId',
@@ -88,6 +94,7 @@ export interface FileRoutesByFullPath {
   '/wallets': typeof WalletsRouteWithChildren
   '/vaults/$vaultId': typeof VaultsVaultIdRoute
   '/wallets/$walletId': typeof WalletsWalletIdRoute
+  '/vaults/': typeof VaultsIndexRoute
   '/wallets/': typeof WalletsIndexRoute
 }
 export interface FileRoutesByTo {
@@ -97,9 +104,9 @@ export interface FileRoutesByTo {
   '/send': typeof SendRoute
   '/settings': typeof SettingsRoute
   '/vault-detail': typeof VaultDetailRoute
-  '/vaults': typeof VaultsRouteWithChildren
   '/vaults/$vaultId': typeof VaultsVaultIdRoute
   '/wallets/$walletId': typeof WalletsWalletIdRoute
+  '/vaults': typeof VaultsIndexRoute
   '/wallets': typeof WalletsIndexRoute
 }
 export interface FileRoutesById {
@@ -114,6 +121,7 @@ export interface FileRoutesById {
   '/wallets': typeof WalletsRouteWithChildren
   '/vaults/$vaultId': typeof VaultsVaultIdRoute
   '/wallets/$walletId': typeof WalletsWalletIdRoute
+  '/vaults/': typeof VaultsIndexRoute
   '/wallets/': typeof WalletsIndexRoute
 }
 export interface FileRouteTypes {
@@ -129,6 +137,7 @@ export interface FileRouteTypes {
     | '/wallets'
     | '/vaults/$vaultId'
     | '/wallets/$walletId'
+    | '/vaults/'
     | '/wallets/'
   fileRoutesByTo: FileRoutesByTo
   to:
@@ -138,9 +147,9 @@ export interface FileRouteTypes {
     | '/send'
     | '/settings'
     | '/vault-detail'
-    | '/vaults'
     | '/vaults/$vaultId'
     | '/wallets/$walletId'
+    | '/vaults'
     | '/wallets'
   id:
     | '__root__'
@@ -154,6 +163,7 @@ export interface FileRouteTypes {
     | '/wallets'
     | '/vaults/$vaultId'
     | '/wallets/$walletId'
+    | '/vaults/'
     | '/wallets/'
   fileRoutesById: FileRoutesById
 }
@@ -233,6 +243,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof WalletsIndexRouteImport
       parentRoute: typeof WalletsRoute
     }
+    '/vaults/': {
+      id: '/vaults/'
+      path: '/'
+      fullPath: '/vaults/'
+      preLoaderRoute: typeof VaultsIndexRouteImport
+      parentRoute: typeof VaultsRoute
+    }
     '/wallets/$walletId': {
       id: '/wallets/$walletId'
       path: '/$walletId'
@@ -252,10 +269,12 @@ declare module '@tanstack/react-router' {
 
 interface VaultsRouteChildren {
   VaultsVaultIdRoute: typeof VaultsVaultIdRoute
+  VaultsIndexRoute: typeof VaultsIndexRoute
 }
 
 const VaultsRouteChildren: VaultsRouteChildren = {
   VaultsVaultIdRoute: VaultsVaultIdRoute,
+  VaultsIndexRoute: VaultsIndexRoute,
 }
 
 const VaultsRouteWithChildren =

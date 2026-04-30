@@ -27,13 +27,13 @@ export function VaultCard({ vault, animateDelay = 0 }: { vault: Vault; animateDe
 
   return (
     <Link
-      to="/vault-detail"
-      search={{ id: vault.id }}
+      to="/vaults/$vaultId"
+      params={{ vaultId: vault.id }}
       className={`vault-card cat-${vault.category}`}
       style={{ textDecoration: "none" }}
       onClick={(e) => {
         e.preventDefault();
-        navigate({ to: "/vault-detail", search: { id: vault.id } });
+        navigate({ to: "/vaults/$vaultId", params: { vaultId: vault.id } });
       }}
     >
       <span className="vault-accent" />
