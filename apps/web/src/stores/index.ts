@@ -53,6 +53,8 @@ export interface Vault {
 // ---------- Wallet store ----------
 interface WalletState {
   isInitialized: boolean;
+  wallets: NativeWalletSnapshot[];
+  activeWalletFingerprint: string;
   walletFingerprint: string;
   createdAtTs: number | null;
   birthdayHeight: number | null;
@@ -70,6 +72,8 @@ interface WalletState {
   priceChange24h: number;
   reset: () => void;
   applyWalletSnapshot: (snapshot: NativeWalletSnapshot) => void;
+  setWallets: (wallets: NativeWalletSnapshot[], activeWalletFingerprint?: string) => void;
+  setActiveWallet: (walletFingerprint: string) => void;
   createWalletFromMnemonic: (mnemonic: string, network: "mainnet" | "testnet") => void;
   restoreWalletFromMnemonic: (mnemonic: string, network: "mainnet" | "testnet") => { ok: boolean; error?: string };
   addTx: (tx: TxRecord) => void;
@@ -80,6 +84,8 @@ export const useWalletStore = create<WalletState>()(
   persist(
     (set, get) => ({
       isInitialized: false,
+      wallets: [],
+      activeWalletFingerprint: "",
       walletFingerprint: "",
       createdAtTs: null,
       birthdayHeight: null,
@@ -93,10 +99,12 @@ export const useWalletStore = create<WalletState>()(
       saplingAddress: "",
       transparentAddress: "",
       txHistory: [],
-      zecUsdPrice: 32.41,
+      zecUsdPrice: 364.1,
       priceChange24h: 2.4,
       reset: () => set({
         isInitialized: false,
+        wallets: [],
+        activeWalletFingerprint: "",
         walletFingerprint: "",
         createdAtTs: null,
         birthdayHeight: null,
@@ -108,18 +116,59 @@ export const useWalletStore = create<WalletState>()(
         transparentAddress: "",
         txHistory: [],
       }),
-      applyWalletSnapshot: (snapshot) => set({
-        isInitialized: true,
-        walletFingerprint: snapshot.walletFingerprint,
-        createdAtTs: snapshot.createdAtTs * 1000,
-        birthdayHeight: snapshot.birthdayHeight,
-        unifiedAddress: snapshot.unifiedAddress,
-        saplingAddress: snapshot.saplingAddress,
-        transparentAddress: snapshot.transparentAddress,
-        txHistory: [],
-        totalZat: 0,
-        spendableZat: 0,
-        pendingZat: 0,
+      applyWalletSnapshot: (snapshot) => set((state) => {
+        const wallets = state.wallets.filter((w) => w.walletFingerprint !== snapshot.walletFingerprint);
+        wallets.unshift(snapshot);
+        return {
+          isInitialized: true,
+          wallets,
+          activeWalletFingerprint: snapshot.walletFingerprint,
+          walletFingerprint: snapshot.walletFingerprint,
+          createdAtTs: snapshot.createdAtTs * 1000,
+          birthdayHeight: snapshot.birthdayHeight,
+          unifiedAddress: snapshot.unifiedAddress,
+          saplingAddress: snapshot.saplingAddress,
+          transparentAddress: snapshot.transparentAddress,
+          txHistory: [],
+          totalZat: 0,
+          spendableZat: 0,
+          pendingZat: 0,
+        };
+      }),
+      setWallets: (wallets, activeWalletFingerprint) => set(() => {
+        const active = wallets.find((w) => w.walletFingerprint === activeWalletFingerprint) ?? wallets[0];
+        return {
+          wallets,
+          isInitialized: wallets.length > 0,
+          activeWalletFingerprint: active?.walletFingerprint ?? "",
+          walletFingerprint: active?.walletFingerprint ?? "",
+          createdAtTs: active ? active.createdAtTs * 1000 : null,
+          birthdayHeight: active?.birthdayHeight ?? null,
+          unifiedAddress: active?.unifiedAddress ?? "",
+          saplingAddress: active?.saplingAddress ?? "",
+          transparentAddress: active?.transparentAddress ?? "",
+          txHistory: [],
+          totalZat: 0,
+          spendableZat: 0,
+          pendingZat: 0,
+        };
+      }),
+      setActiveWallet: (walletFingerprint) => set((state) => {
+        const active = state.wallets.find((w) => w.walletFingerprint === walletFingerprint);
+        if (!active) return {};
+        return {
+          activeWalletFingerprint: walletFingerprint,
+          walletFingerprint,
+          createdAtTs: active.createdAtTs * 1000,
+          birthdayHeight: active.birthdayHeight,
+          unifiedAddress: active.unifiedAddress,
+          saplingAddress: active.saplingAddress,
+          transparentAddress: active.transparentAddress,
+          txHistory: [],
+          totalZat: 0,
+          spendableZat: 0,
+          pendingZat: 0,
+        };
       }),
       createWalletFromMnemonic: (mnemonic, network) => {
         const normalized = normalizeMnemonic(mnemonic);

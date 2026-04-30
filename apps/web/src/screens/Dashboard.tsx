@@ -11,7 +11,7 @@ import { useWallet } from "@/hooks/useWallet";
 
 export function Dashboard() {
   const userName = useSettings((s) => s.userName);
-  const { totalZat, spendableZat, zecUsdPrice, priceChange24h, txHistory, syncStatus } = useWalletStore();
+  const { totalZat, spendableZat, zecUsdPrice, priceChange24h, txHistory, syncStatus, unifiedAddress, saplingAddress, transparentAddress, wallets, activeWalletFingerprint, walletFingerprint } = useWalletStore();
   const setSyncStatus = useWalletStore((s) => s.setSyncStatus);
   const vaults = useVaultStore((s) => s.vaults);
   const [showNewVault, setShowNewVault] = useState(false);
@@ -24,6 +24,11 @@ export function Dashboard() {
     const h = new Date().getHours();
     return h < 12 ? "Good morning" : h < 18 ? "Good afternoon" : "Good evening";
   }, []);
+  const activeWallet = useMemo(
+    () => wallets.find((w) => w.walletFingerprint === (activeWalletFingerprint || walletFingerprint)),
+    [wallets, activeWalletFingerprint, walletFingerprint],
+  );
+  const activeWalletName = activeWallet?.walletName?.trim() || "Active wallet";
 
   useEffect(() => {
     let dispose = () => {};
@@ -46,8 +51,19 @@ export function Dashboard() {
       {/* Header */}
       <div className="hstack between" style={{ marginBottom: 24 }}>
         <div>
-          <div className="t-caption text-gray-400">{greeting},</div>
-          <h1 className="t-h1">{userName}</h1>
+          <div className="t-caption text-gray-400">{greeting}, {userName}</div>
+          <h1 className="t-h1">{activeWalletName}</h1>
+          <div className="hstack gap-8" style={{ marginTop: 8, flexWrap: "wrap" }}>
+            {(unifiedAddress || activeWallet?.unifiedAddress) && (
+              <span className="pill">{truncateAddress(unifiedAddress || activeWallet?.unifiedAddress || "")}</span>
+            )}
+            {(saplingAddress || activeWallet?.saplingAddress) && (
+              <span className="pill">{truncateAddress(saplingAddress || activeWallet?.saplingAddress || "")}</span>
+            )}
+            {(transparentAddress || activeWallet?.transparentAddress) && (
+              <span className="pill">{truncateAddress(transparentAddress || activeWallet?.transparentAddress || "")}</span>
+            )}
+          </div>
         </div>
         <span className={`pill ${syncStatus === "synced" ? "pill-success" : syncStatus === "syncing" ? "pill-warning" : "pill-danger"}`}>
           <span className={`sync-dot ${syncStatus !== "synced" ? syncStatus : ""}`} style={{ marginRight: 4 }} />
