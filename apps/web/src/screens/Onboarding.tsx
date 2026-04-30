@@ -175,7 +175,7 @@ export function Onboarding() {
             border: "1px solid var(--coral-200)",
             display: "grid", placeItems: "center", color: "var(--coral-400)",
           }}>
-            <Icon name="pig" size={20} />
+            <Icon name="owl" size={20} />
           </div>
           <div>
             {/* <div className="onboarding-aside-eyebrow">ZECVAULT</div> */}
