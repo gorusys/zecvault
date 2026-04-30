@@ -94,6 +94,7 @@
 }
 
 :root[data-theme="dark"] {
+  color-scheme: dark;
   --coral-50: #2C1C1C;
   --coral-100: #3A2424;
   --coral-200: #5A3434;
@@ -386,6 +387,16 @@ a { color: inherit; text-decoration: none; }
 .input.error { border-color: var(--coral-200); }
 .input.success { border-color: var(--success-strong); }
 textarea.input { min-height: 72px; padding: 12px 14px; height: auto; resize: vertical; }
+
+select.input {
+  background-color: var(--gray-0);
+  color: var(--gray-800);
+}
+
+:root[data-theme="dark"] select.input option {
+  background-color: var(--gray-0);
+  color: var(--gray-800);
+}
 
 .label {
   display: block;
