@@ -14,6 +14,8 @@ use zip32::AccountId;
 struct WalletRecord {
     mnemonic: String,
     network: String,
+    #[serde(default)]
+    wallet_name: String,
     wallet_fingerprint: String,
     unified_address: String,
     sapling_address: String,
@@ -26,6 +28,7 @@ struct WalletRecord {
 #[serde(rename_all = "camelCase")]
 struct WalletSnapshot {
     network: String,
+    wallet_name: String,
     wallet_fingerprint: String,
     unified_address: String,
     sapling_address: String,
@@ -141,6 +144,7 @@ fn default_birthday_height(network: &str) -> u32 {
 fn to_public_snapshot(record: &WalletRecord) -> WalletSnapshot {
     WalletSnapshot {
         network: record.network.clone(),
+        wallet_name: record.wallet_name.clone(),
         wallet_fingerprint: record.wallet_fingerprint.clone(),
         unified_address: record.unified_address.clone(),
         sapling_address: record.sapling_address.clone(),
@@ -150,27 +154,30 @@ fn to_public_snapshot(record: &WalletRecord) -> WalletSnapshot {
     }
 }
 
-fn build_record(normalized_mnemonic: &str, network: &str, birthday_height: u32) -> WalletRecord {
-    let (unified_address, sapling_address, transparent_address) =
-        derive_real_addresses(normalized_mnemonic, network).unwrap_or_else(|_| {
-            let suffix = deterministic_hex(&format!("{}|{}", network, normalized_mnemonic), 76);
-            let transparent_suffix = deterministic_hex(&format!("t|{}|{}", network, normalized_mnemonic), 33);
-            (
-                format!("u1{}", suffix),
-                format!("zs1{}", suffix),
-                format!("t1{}", transparent_suffix),
-            )
-        });
-    WalletRecord {
+fn build_record(
+    normalized_mnemonic: &str,
+    network: &str,
+    birthday_height: u32,
+    wallet_name: Option<&str>,
+) -> Result<WalletRecord, String> {
+    let (unified_address, sapling_address, transparent_address) = derive_real_addresses(normalized_mnemonic, network)?;
+    let fingerprint = deterministic_hex(&format!("fp|{}", normalized_mnemonic), 16);
+    let resolved_name = wallet_name
+        .map(|n| n.trim())
+        .filter(|n| !n.is_empty())
+        .map(ToString::to_string)
+        .unwrap_or_else(|| format!("Wallet {}", &fingerprint[0..6]));
+    Ok(WalletRecord {
         mnemonic: normalized_mnemonic.to_string(),
         network: network.to_string(),
-        wallet_fingerprint: deterministic_hex(&format!("fp|{}", normalized_mnemonic), 16),
+        wallet_name: resolved_name,
+        wallet_fingerprint: fingerprint,
         unified_address,
         sapling_address,
         transparent_address,
         created_at_ts: now_unix_ts(),
         birthday_height,
-    }
+    })
 }
 
 fn wallet_file(app: &tauri::AppHandle) -> Result<PathBuf, String> {
@@ -211,7 +218,7 @@ fn wallet_create(app: tauri::AppHandle, network: String, password: String) -> Re
     let mnemonic = Mnemonic::generate_in(Language::English, 24)
         .map_err(|e| format!("mnemonic generation failed: {}", e))?;
     let normalized = normalize_mnemonic(&mnemonic.to_string());
-    let record = build_record(&normalized, &network, default_birthday_height(&network));
+    let record = build_record(&normalized, &network, default_birthday_height(&network), None)?;
     Ok(WalletCreateResponse {
         mnemonic_words: normalized.split(' ').map(String::from).collect(),
         snapshot: to_public_snapshot(&record),
@@ -226,9 +233,11 @@ fn wallet_finalize_create(
     birthday_height: Option<u32>,
     draft_id: Option<String>,
     password: String,
+    wallet_name: Option<String>,
 )-> Result<WalletOpResponse, String> {
     let _ = draft_id;
     let _ = password;
+    let _ = &wallet_name;
     let normalized = normalize_mnemonic(&mnemonic);
     let words = normalized.split(' ').count();
     if words != 24 {
@@ -250,7 +259,8 @@ fn wallet_finalize_create(
         &normalized,
         &network,
         birthday_height.unwrap_or_else(|| default_birthday_height(&network)),
-    );
+        wallet_name.as_deref(),
+    )?;
     write_wallet(&path, &record)?;
     Ok(WalletOpResponse {
         ok: true,
@@ -267,9 +277,11 @@ fn wallet_restore(
     birthday_height: Option<u32>,
     draft_id: Option<String>,
     password: String,
+    wallet_name: Option<String>,
 )-> Result<WalletOpResponse, String> {
     let _ = draft_id;
     let _ = password;
+    let _ = &wallet_name;
     let normalized = normalize_mnemonic(&mnemonic);
     let words = normalized.split(' ').count();
     if words != 24 {
@@ -291,7 +303,8 @@ fn wallet_restore(
         &normalized,
         &network,
         birthday_height.unwrap_or_else(|| default_birthday_height(&network)),
-    );
+        wallet_name.as_deref(),
+    )?;
     write_wallet(&path, &record)?;
     let snapshot = to_public_snapshot(&record);
     Ok(WalletOpResponse {
