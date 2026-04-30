@@ -7,7 +7,8 @@ import {
   restoreWalletNative,
   setActiveWalletNative,
 } from "@/lib/wallet-native";
-import { useSettings, useWalletStore } from "@/stores";
+import { fmtZec } from "@/lib/zec";
+import { useSettings, useVaultStore, useWalletStore } from "@/stores";
 import { Icon } from "@/components/Icon";
 import { toast } from "@/stores/toast";
 
@@ -17,8 +18,11 @@ export function Wallets() {
   const wallets = useWalletStore((s) => s.wallets);
   const activeWalletFingerprint = useWalletStore((s) => s.activeWalletFingerprint);
   const fallbackWalletFingerprint = useWalletStore((s) => s.walletFingerprint);
+  const totalZat = useWalletStore((s) => s.totalZat);
+  const spendableZat = useWalletStore((s) => s.spendableZat);
   const setActiveWallet = useWalletStore((s) => s.setActiveWallet);
   const setWallets = useWalletStore((s) => s.setWallets);
+  const vaults = useVaultStore((s) => s.vaults);
 
   const [showAdd, setShowAdd] = useState(false);
   const [addMode, setAddMode] = useState<"create" | "import">("create");
@@ -224,6 +228,9 @@ export function Wallets() {
           <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
             {wallets.map((w) => {
               const isActive = (activeWalletFingerprint || fallbackWalletFingerprint) === w.walletFingerprint;
+              const lockedZat = vaults
+                .filter((v) => (v.walletFingerprint || w.walletFingerprint) === w.walletFingerprint)
+                .reduce((sum, v) => sum + v.currentBalanceZat, 0);
               return (
                 <div key={w.walletFingerprint} className="hstack between" style={{ padding: 10, border: "1px solid var(--gray-100)", borderRadius: "var(--r-md)" }}>
                   <div>
@@ -232,6 +239,11 @@ export function Wallets() {
                       {w.network} • {w.walletFingerprint}
                     </div>
                     <div className="t-caption text-gray-400">{w.unifiedAddress.slice(0, 12)}…{w.unifiedAddress.slice(-10)}</div>
+                    <div className="hstack gap-8" style={{ marginTop: 8, flexWrap: "wrap" }}>
+                      <span className="pill">Total: {isActive ? `${fmtZec(totalZat)} ZEC` : "Set active to load"}</span>
+                      <span className="pill">Locked: {fmtZec(lockedZat)} ZEC</span>
+                      <span className="pill">Spendable: {isActive ? `${fmtZec(spendableZat)} ZEC` : "Set active to load"}</span>
+                    </div>
                   </div>
                   <div className="hstack gap-8">
                     <button
