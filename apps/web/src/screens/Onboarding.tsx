@@ -61,7 +61,7 @@ export function Onboarding() {
       try {
         setSeedLoading(true);
         setSeedError(null);
-        const created = await createWalletNative(network, walletPassword);
+        const created = await createWalletNative(network);
         if (ignore) return;
         setSeed(created.mnemonicWords);
         setCreatedSnapshot(created.snapshot);
@@ -320,7 +320,7 @@ function StepWallet({
       </div>
       {walletChoice && (
         <div style={{ marginTop: 20 }}>
-          <label className="label">Wallet password (desktop encryption)</label>
+          <label className="label">App password</label>
           <input
             type="password"
             className="input"

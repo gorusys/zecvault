@@ -8,6 +8,7 @@ import {
 
 export interface NativeWalletSnapshot {
   network: "mainnet" | "testnet";
+  walletName?: string;
   walletFingerprint: string;
   unifiedAddress: string;
   saplingAddress: string;
@@ -26,6 +27,16 @@ interface NativeOpResponse {
   ok: boolean;
   snapshot?: NativeWalletSnapshot;
   error?: string;
+}
+
+export interface NativeWalletListResponse {
+  wallets: NativeWalletSnapshot[];
+  activeWalletFingerprint?: string;
+}
+
+export interface NativeAppLockState {
+  configured: boolean;
+  locked: boolean;
 }
 
 function isTauriRuntime() {
@@ -62,10 +73,9 @@ function fallbackSnapshot(mnemonic: string, network: "mainnet" | "testnet"): Nat
   };
 }
 
-export async function createWalletNative(network: "mainnet" | "testnet", password: string): Promise<NativeCreateResponse> {
-  void password;
+export async function createWalletNative(network: "mainnet" | "testnet"): Promise<NativeCreateResponse> {
   if (isTauriRuntime()) {
-    return invokeTauri<NativeCreateResponse>("wallet_create", { network, password }, 60_000);
+    return invokeTauri<NativeCreateResponse>("wallet_create", { network }, 60_000);
   }
   const mnemonicWords = generateWalletMnemonic();
   const snapshot = fallbackSnapshot(mnemonicWords.join(" "), network);
@@ -75,9 +85,10 @@ export async function createWalletNative(network: "mainnet" | "testnet", passwor
 export async function finalizeCreateWalletNative(
   mnemonic: string,
   network: "mainnet" | "testnet",
-  password: string,
+  password?: string,
   birthdayHeight?: number,
   draftId?: string,
+  walletName?: string,
 ): Promise<NativeOpResponse> {
   const normalized = normalizeMnemonic(mnemonic);
   if (!isValidWalletMnemonic(normalized)) {
@@ -90,6 +101,7 @@ export async function finalizeCreateWalletNative(
       password,
       birthdayHeight,
       draftId,
+      walletName,
     }, 60_000);
   }
   return { ok: true, snapshot: fallbackSnapshot(normalized, network) };
@@ -98,17 +110,51 @@ export async function finalizeCreateWalletNative(
 export async function restoreWalletNative(
   mnemonic: string,
   network: "mainnet" | "testnet",
-  password: string,
+  password?: string,
   birthdayHeight?: number,
+  walletName?: string,
 ): Promise<NativeOpResponse> {
   const normalized = normalizeMnemonic(mnemonic);
   if (!isValidWalletMnemonic(normalized)) {
     return { ok: false, error: "Invalid 24-word BIP39 mnemonic." };
   }
   if (isTauriRuntime()) {
-    return invokeTauri<NativeOpResponse>("wallet_restore", { mnemonic: normalized, network, password, birthdayHeight }, 60_000);
+    return invokeTauri<NativeOpResponse>("wallet_restore", { mnemonic: normalized, network, password, birthdayHeight, walletName }, 60_000);
   }
   return { ok: true, snapshot: fallbackSnapshot(normalized, network) };
+}
+
+export async function getAppLockStateNative(): Promise<NativeAppLockState> {
+  if (isTauriRuntime()) {
+    try {
+      return await invokeTauri<NativeAppLockState>("app_get_lock_state");
+    } catch {
+      return { configured: false, locked: false };
+    }
+  }
+  return { configured: false, locked: false };
+}
+
+export async function lockAppNative(): Promise<boolean> {
+  if (isTauriRuntime()) {
+    try {
+      return await invokeTauri<boolean>("app_lock");
+    } catch {
+      return false;
+    }
+  }
+  return true;
+}
+
+export async function unlockAppNative(password: string): Promise<boolean> {
+  if (isTauriRuntime()) {
+    try {
+      return await invokeTauri<boolean>("app_unlock", { password });
+    } catch {
+      return false;
+    }
+  }
+  return true;
 }
 
 export async function getWalletStateNative(): Promise<NativeOpResponse> {
@@ -116,6 +162,59 @@ export async function getWalletStateNative(): Promise<NativeOpResponse> {
     return invokeTauri<NativeOpResponse>("wallet_get_state");
   }
   return { ok: false };
+}
+
+export async function listWalletsNative(): Promise<NativeWalletListResponse> {
+  if (isTauriRuntime()) {
+    try {
+      return await invokeTauri<NativeWalletListResponse>("wallet_list");
+    } catch {
+      // Backward-compatible fallback for older native shells that only expose one wallet.
+      try {
+        const state = await getWalletStateNative();
+        return {
+          wallets: state.ok && state.snapshot ? [state.snapshot] : [],
+          activeWalletFingerprint: state.snapshot?.walletFingerprint,
+        };
+      } catch {
+        return { wallets: [] };
+      }
+    }
+  }
+  return { wallets: [] };
+}
+
+export async function setActiveWalletNative(walletFingerprint: string): Promise<NativeOpResponse> {
+  if (isTauriRuntime()) {
+    try {
+      return await invokeTauri<NativeOpResponse>("wallet_set_active", { walletFingerprint });
+    } catch {
+      return { ok: false, error: "Native wallet switching is unavailable on this platform build." };
+    }
+  }
+  return { ok: false, error: "Native runtime unavailable." };
+}
+
+export async function renameWalletNative(walletFingerprint: string, walletName: string): Promise<NativeOpResponse> {
+  if (isTauriRuntime()) {
+    try {
+      return await invokeTauri<NativeOpResponse>("wallet_update_name", { walletFingerprint, walletName }, 30_000);
+    } catch {
+      return { ok: false, error: "Native wallet rename is unavailable on this platform build." };
+    }
+  }
+  return { ok: false, error: "Native runtime unavailable." };
+}
+
+export async function removeWalletNative(walletFingerprint: string): Promise<NativeOpResponse> {
+  if (isTauriRuntime()) {
+    try {
+      return await invokeTauri<NativeOpResponse>("wallet_remove", { walletFingerprint }, 30_000);
+    } catch {
+      return { ok: false, error: "Native wallet removal is unavailable on this platform build." };
+    }
+  }
+  return { ok: false, error: "Native runtime unavailable." };
 }
 
 export async function resetWalletNative(): Promise<NativeOpResponse> {

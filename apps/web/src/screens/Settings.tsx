@@ -1,6 +1,7 @@
 import { useSettings, useVaultStore, useWalletStore } from "@/stores";
 import { toast } from "@/stores/toast";
 import { useWallet } from "@/hooks/useWallet";
+import { lockAppNative } from "@/lib/wallet-native";
 
 export function Settings() {
   const s = useSettings();
@@ -19,6 +20,20 @@ export function Settings() {
           <Row label="PIN code" desc="6-digit PIN as backup">
             <Toggle on={s.pinEnabled} onChange={(v) => s.set("pinEnabled", v)} />
           </Row>
+          <button
+            className="btn btn-secondary btn-block"
+            style={{ marginTop: 12 }}
+            onClick={async () => {
+              const ok = await lockAppNative();
+              if (!ok) {
+                toast({ type: "danger", title: "Lock failed", description: "Could not lock app." });
+                return;
+              }
+              location.reload();
+            }}
+          >
+            Lock app now
+          </button>
           <button className="btn btn-secondary btn-block" style={{ marginTop: 12 }}>View seed phrase</button>
         </Card>
 

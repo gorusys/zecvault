@@ -64,22 +64,20 @@ export function useWallet() {
     };
   }
 
-  async function importWallet(mnemonic: string, password: string, birthdayHeight?: number): Promise<boolean> {
+  async function importWallet(mnemonic: string, birthdayHeight?: number): Promise<boolean> {
     if (!isTauriRuntime()) return false;
     const resp = await invoke<{ ok: boolean }>("wallet_restore", {
       mnemonic,
       network: "mainnet",
       birthdayHeight,
-      password,
     });
     return Boolean(resp?.ok);
   }
 
-  async function createWallet(password: string): Promise<string[]> {
+  async function createWallet(): Promise<string[]> {
     if (!isTauriRuntime()) return [];
     const resp = await invoke<{ mnemonicWords: string[] }>("wallet_create", {
       network: "mainnet",
-      password,
     });
     return resp?.mnemonicWords ?? [];
   }
