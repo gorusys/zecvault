@@ -16,6 +16,10 @@
   "permissions": [
     "core:default",
     "store:default",
-    "log:default"
+    "log:default",
+    "dialog:allow-save",
+    "fs:allow-write-text-file",
+    "fs:allow-home-write",
+    "fs:allow-home-read"
   ]
 }

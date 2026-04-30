@@ -93,6 +93,15 @@ struct AppLockStateResponse {
     locked: bool,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct WalletBackupExport {
+    wallet_fingerprint: String,
+    wallet_name: String,
+    network: String,
+    mnemonic: String,
+}
+
 #[derive(Default)]
 struct AppSecurityState {
     unlocked_password: Mutex<Option<String>>,
@@ -194,6 +203,36 @@ fn encrypt_mnemonic(mnemonic: &str, password: &str) -> Result<(String, String, S
     Ok((B64.encode(ciphertext), B64.encode(salt), B64.encode(nonce)))
 }
 
+fn decrypt_mnemonic(
+    ciphertext_b64: &str,
+    salt_b64: &str,
+    nonce_b64: &str,
+    password: &str,
+) -> Result<String, String> {
+    validate_password(password)?;
+    let ciphertext = B64
+        .decode(ciphertext_b64.as_bytes())
+        .map_err(|e| format!("ciphertext decode failed: {}", e))?;
+    let salt = B64
+        .decode(salt_b64.as_bytes())
+        .map_err(|e| format!("salt decode failed: {}", e))?;
+    let nonce = B64
+        .decode(nonce_b64.as_bytes())
+        .map_err(|e| format!("nonce decode failed: {}", e))?;
+    if salt.len() != 16 || nonce.len() != 12 {
+        return Err("invalid wallet encryption metadata".to_string());
+    }
+    let mut key = [0u8; 32];
+    Argon2::default()
+        .hash_password_into(password.as_bytes(), &salt, &mut key)
+        .map_err(|e| format!("password KDF failed: {}", e))?;
+    let cipher = Aes256Gcm::new_from_slice(&key).map_err(|e| format!("cipher init failed: {}", e))?;
+    let plaintext = cipher
+        .decrypt(Nonce::from_slice(&nonce), ciphertext.as_ref())
+        .map_err(|_| "Invalid wallet password.".to_string())?;
+    String::from_utf8(plaintext).map_err(|e| format!("decrypted mnemonic utf8 failed: {}", e))
+}
+
 fn hash_password(password: &str, salt: &[u8]) -> Result<[u8; 32], String> {
     let mut key = [0u8; 32];
     Argon2::default()
@@ -271,6 +310,34 @@ fn ensure_app_unlocked(app: &tauri::AppHandle, store: &WalletStore) -> Result<()
         return Err("App is locked. Unlock the app first.".to_string());
     }
     Ok(())
+}
+
+fn wallet_plain_mnemonic(
+    app: &tauri::AppHandle,
+    store: &WalletStore,
+    wallet: &WalletRecord,
+) -> Result<String, String> {
+    if let Some(mnemonic) = &wallet.mnemonic {
+        return Ok(normalize_mnemonic(mnemonic));
+    }
+    if wallet.mnemonic_ciphertext_b64.is_empty()
+        || wallet.mnemonic_salt_b64.is_empty()
+        || wallet.mnemonic_nonce_b64.is_empty()
+    {
+        return Err("Wallet backup data is unavailable for this wallet record.".to_string());
+    }
+    let password = if is_app_password_configured(store) {
+        get_unlocked_password(app)
+            .ok_or_else(|| "App is locked. Unlock the app first.".to_string())?
+    } else {
+        return Err("App password is not configured for backup export.".to_string());
+    };
+    decrypt_mnemonic(
+        &wallet.mnemonic_ciphertext_b64,
+        &wallet.mnemonic_salt_b64,
+        &wallet.mnemonic_nonce_b64,
+        &password,
+    )
 }
 
 fn resolve_wallet_password(
@@ -818,6 +885,46 @@ fn wallet_remove(app: tauri::AppHandle, wallet_fingerprint: String) -> Result<Wa
 }
 
 #[tauri::command]
+fn wallet_export_backup(
+    app: tauri::AppHandle,
+    wallet_fingerprint: String,
+) -> Result<WalletBackupExport, String> {
+    let path = wallet_store_file(&app)?;
+    let store = read_wallet_store(&path)?;
+    ensure_app_unlocked(&app, &store)?;
+    let wallet = store
+        .wallets
+        .iter()
+        .find(|w| w.wallet_fingerprint == wallet_fingerprint)
+        .ok_or_else(|| "Wallet fingerprint not found.".to_string())?;
+    let mnemonic = wallet_plain_mnemonic(&app, &store, wallet)?;
+    Ok(WalletBackupExport {
+        wallet_fingerprint: wallet.wallet_fingerprint.clone(),
+        wallet_name: wallet.wallet_name.clone(),
+        network: wallet.network.clone(),
+        mnemonic,
+    })
+}
+
+#[tauri::command]
+fn wallet_export_all_backups(app: tauri::AppHandle) -> Result<Vec<WalletBackupExport>, String> {
+    let path = wallet_store_file(&app)?;
+    let store = read_wallet_store(&path)?;
+    ensure_app_unlocked(&app, &store)?;
+    let mut exports = Vec::with_capacity(store.wallets.len());
+    for wallet in &store.wallets {
+        let mnemonic = wallet_plain_mnemonic(&app, &store, wallet)?;
+        exports.push(WalletBackupExport {
+            wallet_fingerprint: wallet.wallet_fingerprint.clone(),
+            wallet_name: wallet.wallet_name.clone(),
+            network: wallet.network.clone(),
+            mnemonic,
+        });
+    }
+    Ok(exports)
+}
+
+#[tauri::command]
 fn app_get_lock_state(app: tauri::AppHandle) -> Result<AppLockStateResponse, String> {
     let path = wallet_store_file(&app)?;
     let store = read_wallet_store(&path)?;
@@ -974,6 +1081,8 @@ pub fn run() {
     tauri::Builder::default()
         .manage(AppSecurityState::default())
         .plugin(tauri_plugin_store::Builder::new().build())
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_fs::init())
         .plugin(
             tauri_plugin_log::Builder::new()
                 .level(log::LevelFilter::Info)
@@ -988,6 +1097,8 @@ pub fn run() {
             wallet_set_active,
             wallet_update_name,
             wallet_remove,
+            wallet_export_backup,
+            wallet_export_all_backups,
             app_get_lock_state,
             app_lock,
             app_unlock,
