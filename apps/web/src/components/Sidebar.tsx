@@ -12,6 +12,7 @@ export function Sidebar() {
 
   const items: NavDef[] = [
     { to: "/", icon: "home", label: "Dashboard", section: "Main" },
+    { to: "/wallets" as const, icon: "wallet", label: "Wallets", section: "Main" },
     { to: "/vaults" as const, icon: "vault", label: "Vaults", section: "Main", badge: vaults.length || undefined },
     { to: "/send" as const, icon: "send", label: "Send", section: "Main" },
     { to: "/receive" as const, icon: "receive", label: "Receive", section: "Main" },
