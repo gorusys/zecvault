@@ -1,20 +1,41 @@
-//! Tauri desktop shell: in release, load bundled frontend assets directly.
+// Tauri desktop shell: in release, load bundled frontend assets directly.
 use aes_gcm::aead::Aead;
 use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
 use argon2::Argon2;
+use async_trait::async_trait;
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine as _;
 use bip39::{Language, Mnemonic};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
+use secrecy::SecretVec;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 use std::sync::Mutex;
+use std::time::Instant;
 use tauri::Manager;
 use tauri::Emitter;
+use zcash_client_backend::data_api::wallet::{
+    ConfirmationsPolicy, SpendingKeys, create_proposed_transactions, propose_standard_transfer_to_address,
+};
+use zcash_client_backend::data_api::chain::{BlockCache, BlockSource};
+use zcash_client_backend::data_api::{AccountBirthday, WalletRead, WalletWrite};
+use zcash_client_backend::fees::StandardFeeRule;
+use zcash_client_backend::proto::compact_formats::CompactBlock;
+use zcash_client_backend::proto::service::{self, compact_tx_streamer_client::CompactTxStreamerClient};
+use zcash_client_backend::sync;
+use zcash_client_backend::wallet::OvkPolicy;
+use zcash_client_sqlite::util::SystemClock;
+use zcash_client_sqlite::wallet::init::init_wallet_db;
+use zcash_client_sqlite::WalletDb;
 use zcash_keys::address::Address as ZcashPoolAddress;
 use zcash_keys::keys::{UnifiedAddressRequest, UnifiedSpendingKey};
-use zcash_protocol::consensus::{MAIN_NETWORK, TEST_NETWORK};
+use zcash_proofs::prover::LocalTxProver;
+use zcash_protocol::ShieldedProtocol;
+use zcash_protocol::consensus::{BlockHeight, MAIN_NETWORK, TEST_NETWORK};
+use zcash_protocol::memo::Memo;
+use zcash_protocol::value::Zatoshis;
 use zip32::AccountId;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -142,6 +163,132 @@ struct WalletCreateDraft {
     network: String,
     birthday_height: u32,
     created_at_ts: i64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TransferProposalPayload {
+    to: String,
+    amount_zat: u64,
+    memo: Option<String>,
+}
+
+const FORCED_LIGHTWALLETD_ENDPOINT: &str = "http://65.108.42.251:9067";
+
+#[derive(Default)]
+struct MemoryBlockCache {
+    blocks: Mutex<Vec<CompactBlock>>,
+}
+
+#[derive(Debug)]
+struct CacheError(&'static str);
+
+impl std::fmt::Display for CacheError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl std::error::Error for CacheError {}
+
+impl BlockSource for MemoryBlockCache {
+    type Error = CacheError;
+
+    fn with_blocks<F, WalletErrT>(
+        &self,
+        from_height: Option<BlockHeight>,
+        limit: Option<usize>,
+        mut with_block: F,
+    ) -> Result<(), zcash_client_backend::data_api::chain::error::Error<WalletErrT, Self::Error>>
+    where
+        F: FnMut(CompactBlock)
+            -> Result<(), zcash_client_backend::data_api::chain::error::Error<WalletErrT, Self::Error>>,
+    {
+        let blocks = self.blocks.lock().map_err(|_| {
+            zcash_client_backend::data_api::chain::error::Error::BlockSource(CacheError(
+                "block cache lock poisoned",
+            ))
+        })?;
+        let start = from_height.map(u32::from).unwrap_or(0);
+        let mut emitted = 0usize;
+        for block in blocks.iter().filter(|b| b.height >= u64::from(start)) {
+            with_block(block.clone())?;
+            emitted += 1;
+            if let Some(max) = limit {
+                if emitted >= max {
+                    break;
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl BlockCache for MemoryBlockCache {
+    fn get_tip_height(
+        &self,
+        range: Option<&zcash_client_backend::data_api::scanning::ScanRange>,
+    ) -> Result<Option<BlockHeight>, Self::Error> {
+        let blocks = self
+            .blocks
+            .lock()
+            .map_err(|_| CacheError("block cache lock poisoned"))?;
+        let mut max_h: Option<u32> = None;
+        for block in blocks.iter() {
+            let h = block.height.min(u64::from(u32::MAX)) as u32;
+            let bh = BlockHeight::from(h);
+            let in_range = range.map(|r| r.block_range().contains(&bh)).unwrap_or(true);
+            if in_range {
+                max_h = Some(max_h.map(|m| m.max(h)).unwrap_or(h));
+            }
+        }
+        Ok(max_h.map(BlockHeight::from))
+    }
+
+    async fn read(
+        &self,
+        range: &zcash_client_backend::data_api::scanning::ScanRange,
+    ) -> Result<Vec<CompactBlock>, Self::Error> {
+        let blocks = self
+            .blocks
+            .lock()
+            .map_err(|_| CacheError("block cache lock poisoned"))?;
+        Ok(blocks
+            .iter()
+            .filter(|b| {
+                let h = BlockHeight::from(b.height.min(u64::from(u32::MAX)) as u32);
+                range.block_range().contains(&h)
+            })
+            .cloned()
+            .collect())
+    }
+
+    async fn insert(&self, mut compact_blocks: Vec<CompactBlock>) -> Result<(), Self::Error> {
+        let mut blocks = self
+            .blocks
+            .lock()
+            .map_err(|_| CacheError("block cache lock poisoned"))?;
+        blocks.append(&mut compact_blocks);
+        blocks.sort_by_key(|b| b.height);
+        blocks.dedup_by_key(|b| b.height);
+        Ok(())
+    }
+
+    async fn delete(
+        &self,
+        range: zcash_client_backend::data_api::scanning::ScanRange,
+    ) -> Result<(), Self::Error> {
+        let mut blocks = self
+            .blocks
+            .lock()
+            .map_err(|_| CacheError("block cache lock poisoned"))?;
+        blocks.retain(|b| {
+            let h = BlockHeight::from(b.height.min(u64::from(u32::MAX)) as u32);
+            !range.block_range().contains(&h)
+        });
+        Ok(())
+    }
 }
 
 fn normalize_mnemonic(input: &str) -> String {
@@ -593,6 +740,221 @@ fn lightwalletd_file(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     Ok(dir.join("lightwalletd.json"))
 }
 
+fn load_lightwalletd_endpoint(app: &tauri::AppHandle) -> Result<String, String> {
+    let _ = app;
+    Ok(FORCED_LIGHTWALLETD_ENDPOINT.to_string())
+}
+
+fn normalize_grpc_endpoint(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+        return trimmed.to_string();
+    }
+    if trimmed.starts_with("localhost")
+        || trimmed.starts_with("127.0.0.1")
+        || trimmed.contains(":9067")
+    {
+        return format!("http://{}", trimmed);
+    }
+    if trimmed.contains(":443") {
+        return format!("https://{}", trimmed);
+    }
+    format!("https://{}", trimmed)
+}
+
+fn lightwalletd_endpoint_candidates(configured: &str, network: &str) -> Vec<String> {
+    let _ = (configured, network);
+    vec![FORCED_LIGHTWALLETD_ENDPOINT.to_string()]
+}
+
+async fn select_lightwalletd_endpoint(candidates: &[String]) -> Result<String, String> {
+    let mut errors = Vec::new();
+    for endpoint in candidates {
+        log::info!("sync endpoint probe start: {}", endpoint);
+        match CompactTxStreamerClient::connect(endpoint.clone()).await {
+            Ok(_) => {
+                log::info!("sync endpoint probe success: {}", endpoint);
+                return Ok(endpoint.clone());
+            }
+            Err(error) => {
+                log::warn!("sync endpoint probe failed: {} => {}", endpoint, error);
+                errors.push(format!("{} => {}", endpoint, error));
+            }
+        }
+    }
+    Err(format!(
+        "lightwalletd connect failed for all candidates: {}",
+        errors.join(" | ")
+    ))
+}
+
+async fn select_lightwalletd_endpoint_with_tip(candidates: &[String]) -> Result<(String, u32), String> {
+    let mut errors = Vec::new();
+    for endpoint in candidates {
+        log::info!("sync endpoint tip probe start: {}", endpoint);
+        let mut client = match CompactTxStreamerClient::connect(endpoint.clone()).await {
+            Ok(client) => client,
+            Err(error) => {
+                log::warn!("sync endpoint tip probe connect failed: {} => {}", endpoint, error);
+                errors.push(format!("{} connect => {}", endpoint, error));
+                continue;
+            }
+        };
+        match client.get_latest_block(service::ChainSpec {}).await {
+            Ok(resp) => {
+                let tip = resp.into_inner().height.min(u64::from(u32::MAX)) as u32;
+                log::info!("sync endpoint tip probe success: {} tip={}", endpoint, tip);
+                return Ok((endpoint.clone(), tip));
+            }
+            Err(error) => {
+                log::warn!("sync endpoint tip probe failed: {} => {}", endpoint, error);
+                errors.push(format!("{} tip => {}", endpoint, error));
+            }
+        }
+    }
+    Err(format!(
+        "lightwalletd tip probe failed for all candidates: {}",
+        errors.join(" | ")
+    ))
+}
+
+fn wallet_runtime_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("failed to resolve app data dir: {}", e))?
+        .join("wallet-runtime");
+    fs::create_dir_all(&dir).map_err(|e| format!("failed to create wallet runtime dir: {}", e))?;
+    Ok(dir)
+}
+
+fn wallet_data_db_path(app: &tauri::AppHandle, wallet_fingerprint: &str) -> Result<PathBuf, String> {
+    let dir = wallet_runtime_dir(app)?;
+    Ok(dir.join(format!("wallet-{}.db", wallet_fingerprint)))
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 2);
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    for b in bytes {
+        out.push(HEX[(b >> 4) as usize] as char);
+        out.push(HEX[(b & 0x0f) as usize] as char);
+    }
+    out
+}
+
+async fn sync_wallet_for_network<P>(
+    params: P,
+    app: &tauri::AppHandle,
+    wallet: &WalletRecord,
+    seed_bytes: &[u8],
+    endpoint: &str,
+) -> Result<(), String>
+where
+    P: zcash_protocol::consensus::Parameters + Clone + Send + Sync + 'static,
+{
+    let sync_started = Instant::now();
+    let candidates = lightwalletd_endpoint_candidates(endpoint, wallet.network.as_str());
+    log::info!(
+        "sync_wallet_for_network start: wallet={} network={} candidates={}",
+        wallet.wallet_fingerprint,
+        wallet.network,
+        candidates.len()
+    );
+    let (selected_endpoint, tip_height) = select_lightwalletd_endpoint_with_tip(&candidates).await?;
+    let mut client = CompactTxStreamerClient::connect(selected_endpoint.clone())
+        .await
+        .map_err(|e| format!("lightwalletd connect failed: {}", e))?;
+    log::info!(
+        "sync using lightwalletd endpoint: wallet={} endpoint={}",
+        wallet.wallet_fingerprint,
+        selected_endpoint
+    );
+
+    log::info!(
+        "sync tip received: wallet={} tip={} birthday={}",
+        wallet.wallet_fingerprint,
+        tip_height,
+        wallet.birthday_height
+    );
+
+    let data_db_path = wallet_data_db_path(app, &wallet.wallet_fingerprint)?;
+    log::info!(
+        "sync opening wallet db: wallet={} path={}",
+        wallet.wallet_fingerprint,
+        data_db_path.display()
+    );
+    let mut db_data = WalletDb::for_path(&data_db_path, params.clone(), SystemClock, rand::rngs::OsRng)
+        .map_err(|e| format!("wallet db open failed: {}", e))?;
+    init_wallet_db(&mut db_data, Some(SecretVec::new(seed_bytes.to_vec())))
+        .map_err(|e| format!("wallet db init failed: {}", e))?;
+
+    let account_ids = db_data
+        .get_account_ids()
+        .map_err(|e| format!("wallet account query failed: {}", e))?;
+    if account_ids.is_empty() {
+        let birthday_prior_height = wallet.birthday_height.saturating_sub(1).min(tip_height);
+        log::info!(
+            "sync account missing; creating account: wallet={} birthday_prior_height={}",
+            wallet.wallet_fingerprint,
+            birthday_prior_height
+        );
+        let tree_state = match client
+            .get_tree_state(service::BlockId {
+                height: u64::from(birthday_prior_height),
+                hash: Vec::new(),
+            })
+            .await
+        {
+            Ok(resp) => resp.into_inner(),
+            Err(primary_err) => {
+                log::warn!(
+                    "tree state missing at birthday height: wallet={} height={} err={}; retrying tip height {}",
+                    wallet.wallet_fingerprint,
+                    birthday_prior_height,
+                    primary_err,
+                    tip_height
+                );
+                client
+                    .get_tree_state(service::BlockId {
+                        height: u64::from(tip_height),
+                        hash: Vec::new(),
+                    })
+                    .await
+                    .map_err(|fallback_err| {
+                        format!(
+                            "tree state query failed at birthday height {} ({}) and tip {} ({})",
+                            birthday_prior_height, primary_err, tip_height, fallback_err
+                        )
+                    })?
+                    .into_inner()
+            }
+        };
+        let birthday = AccountBirthday::from_treestate(tree_state, Some(tip_height.into()))
+            .map_err(|_| "birthday creation failed from tree state".to_string())?;
+        db_data
+            .create_account(&wallet.wallet_name, &SecretVec::new(seed_bytes.to_vec()), &birthday, None)
+            .map_err(|e| format!("wallet account creation failed: {}", e))?;
+    }
+
+    let db_cache = MemoryBlockCache::default();
+    log::info!(
+        "sync::run start: wallet={} tip={}",
+        wallet.wallet_fingerprint,
+        tip_height
+    );
+    sync::run(&mut client, &params, &db_cache, &mut db_data, 100)
+        .await
+        .map_err(|e| format!("wallet sync failed: {}", e))?;
+    log::info!(
+        "sync::run complete: wallet={} elapsed_ms={}",
+        wallet.wallet_fingerprint,
+        sync_started.elapsed().as_millis()
+    );
+
+    Ok(())
+}
+
 #[tauri::command]
 fn wallet_create(
     app: tauri::AppHandle,
@@ -978,19 +1340,85 @@ fn wallet_reset(app: tauri::AppHandle) -> Result<WalletOpResponse, String> {
 }
 
 #[tauri::command]
-fn get_balance(app: tauri::AppHandle) -> Result<BalanceInfo, String> {
+async fn get_balance(app: tauri::AppHandle) -> Result<BalanceInfo, String> {
     let path = wallet_store_file(&app)?;
     let store = read_wallet_store(&path)?;
     ensure_app_unlocked(&app, &store)?;
-    if active_wallet(&store).is_none() {
-        return Err("Wallet is not initialized.".to_string());
+    let wallet = active_wallet(&store).ok_or_else(|| "Wallet is not initialized.".to_string())?;
+    let mnemonic = wallet_plain_mnemonic(&app, &store, wallet)?;
+    let seed = Mnemonic::parse_in_normalized(Language::English, &mnemonic)
+        .map_err(|e| format!("mnemonic parse failed: {}", e))?
+        .to_seed("");
+    let endpoint = normalize_grpc_endpoint(&load_lightwalletd_endpoint(&app)?);
+
+    match wallet.network.as_str() {
+        "mainnet" => sync_wallet_for_network(MAIN_NETWORK, &app, wallet, &seed, &endpoint).await?,
+        "testnet" => sync_wallet_for_network(TEST_NETWORK, &app, wallet, &seed, &endpoint).await?,
+        _ => return Err("Unsupported network. Use mainnet or testnet.".to_string()),
     }
-    Ok(BalanceInfo {
-        orchard_zat: 0,
-        sapling_zat: 0,
-        transparent_zat: 0,
-        pending_zat: 0,
-    })
+
+    let data_db_path = wallet_data_db_path(&app, &wallet.wallet_fingerprint)?;
+    match wallet.network.as_str() {
+        "mainnet" => {
+            let db_data = WalletDb::for_path(&data_db_path, MAIN_NETWORK, SystemClock, rand::rngs::OsRng)
+                .map_err(|e| format!("wallet db open failed: {}", e))?;
+            let summary = db_data
+                .get_wallet_summary(ConfirmationsPolicy::default())
+                .map_err(|e| format!("wallet summary failed: {}", e))?;
+            let mut orchard = 0u64;
+            let mut sapling = 0u64;
+            let mut transparent = 0u64;
+            let mut pending = 0u64;
+            if let Some(summary) = summary {
+                for bal in summary.account_balances().values() {
+                    orchard = orchard.saturating_add(bal.orchard_balance().total().into_u64());
+                    sapling = sapling.saturating_add(bal.sapling_balance().total().into_u64());
+                    transparent = transparent.saturating_add(bal.unshielded_balance().total().into_u64());
+                    pending = pending.saturating_add(
+                        bal.change_pending_confirmation()
+                            .into_u64()
+                            .saturating_add(bal.value_pending_spendability().into_u64()),
+                    );
+                }
+            }
+            Ok(BalanceInfo {
+                orchard_zat: orchard,
+                sapling_zat: sapling,
+                transparent_zat: transparent,
+                pending_zat: pending,
+            })
+        }
+        "testnet" => {
+            let db_data = WalletDb::for_path(&data_db_path, TEST_NETWORK, SystemClock, rand::rngs::OsRng)
+                .map_err(|e| format!("wallet db open failed: {}", e))?;
+            let summary = db_data
+                .get_wallet_summary(ConfirmationsPolicy::default())
+                .map_err(|e| format!("wallet summary failed: {}", e))?;
+            let mut orchard = 0u64;
+            let mut sapling = 0u64;
+            let mut transparent = 0u64;
+            let mut pending = 0u64;
+            if let Some(summary) = summary {
+                for bal in summary.account_balances().values() {
+                    orchard = orchard.saturating_add(bal.orchard_balance().total().into_u64());
+                    sapling = sapling.saturating_add(bal.sapling_balance().total().into_u64());
+                    transparent = transparent.saturating_add(bal.unshielded_balance().total().into_u64());
+                    pending = pending.saturating_add(
+                        bal.change_pending_confirmation()
+                            .into_u64()
+                            .saturating_add(bal.value_pending_spendability().into_u64()),
+                    );
+                }
+            }
+            Ok(BalanceInfo {
+                orchard_zat: orchard,
+                sapling_zat: sapling,
+                transparent_zat: transparent,
+                pending_zat: pending,
+            })
+        }
+        _ => Err("Unsupported network. Use mainnet or testnet.".to_string()),
+    }
 }
 
 #[tauri::command]
@@ -1030,23 +1458,267 @@ fn propose_transfer(
 }
 
 #[tauri::command]
-fn execute_transfer(proposal_json: String) -> Result<String, String> {
-    let _: serde_json::Value =
+async fn execute_transfer(app: tauri::AppHandle, proposal_json: String) -> Result<String, String> {
+    let proposal: TransferProposalPayload =
         serde_json::from_str(&proposal_json).map_err(|e| format!("proposal parse failed: {}", e))?;
-    Ok(deterministic_hex(&proposal_json, 64))
+    if proposal.amount_zat == 0 {
+        return Err("Amount must be greater than zero.".to_string());
+    }
+    let path = wallet_store_file(&app)?;
+    let store = read_wallet_store(&path)?;
+    ensure_app_unlocked(&app, &store)?;
+    let wallet = active_wallet(&store).ok_or_else(|| "Wallet is not initialized.".to_string())?;
+    let mnemonic = wallet_plain_mnemonic(&app, &store, wallet)?;
+    let seed = Mnemonic::parse_in_normalized(Language::English, &mnemonic)
+        .map_err(|e| format!("mnemonic parse failed: {}", e))?
+        .to_seed("");
+    let endpoint = normalize_grpc_endpoint(&load_lightwalletd_endpoint(&app)?);
+    let endpoint_candidates = lightwalletd_endpoint_candidates(&endpoint, wallet.network.as_str());
+
+    let memo_bytes = if let Some(memo) = proposal.memo.clone().filter(|m| !m.trim().is_empty()) {
+        Some(
+            Memo::from_str(memo.trim())
+                .map_err(|e| format!("invalid memo: {}", e))?
+                .encode(),
+        )
+    } else {
+        None
+    };
+
+    match wallet.network.as_str() {
+        "mainnet" => {
+            sync_wallet_for_network(MAIN_NETWORK, &app, wallet, &seed, &endpoint).await?;
+            let data_db_path = wallet_data_db_path(&app, &wallet.wallet_fingerprint)?;
+            let mut db_data = WalletDb::for_path(&data_db_path, MAIN_NETWORK, SystemClock, rand::rngs::OsRng)
+                .map_err(|e| format!("wallet db open failed: {}", e))?;
+            let account_id = db_data
+                .get_account_ids()
+                .map_err(|e| format!("wallet account query failed: {}", e))?
+                .first()
+                .copied()
+                .ok_or_else(|| "No wallet account is initialized.".to_string())?;
+            let to = zcash_keys::address::Address::decode(&MAIN_NETWORK, &proposal.to)
+                .ok_or_else(|| "Invalid recipient address.".to_string())?;
+            let amount =
+                Zatoshis::from_u64(proposal.amount_zat).map_err(|e| format!("invalid amount: {}", e))?;
+            let tx_proposal = propose_standard_transfer_to_address::<_, _, std::convert::Infallible>(
+                &mut db_data,
+                &MAIN_NETWORK,
+                StandardFeeRule::Zip317,
+                account_id,
+                ConfirmationsPolicy::default(),
+                &to,
+                amount,
+                memo_bytes,
+                None,
+                ShieldedProtocol::Orchard,
+            )
+            .map_err(|e| format!("transfer proposal failed: {}", e))?;
+            let usk = UnifiedSpendingKey::from_seed(&MAIN_NETWORK, &seed, AccountId::ZERO)
+                .map_err(|e| format!("spending key derivation failed: {}", e))?;
+            let prover = LocalTxProver::bundled();
+            let txids = create_proposed_transactions::<
+                _,
+                _,
+                std::convert::Infallible,
+                _,
+                std::convert::Infallible,
+                _,
+            >(
+                &mut db_data,
+                &MAIN_NETWORK,
+                &prover,
+                &prover,
+                &SpendingKeys::from_unified_spending_key(usk),
+                OvkPolicy::Sender,
+                &tx_proposal,
+            )
+            .map_err(|e| format!("transaction creation failed: {}", e))?;
+            let txid = txids.first();
+            let tx = db_data
+                .get_transaction(*txid)
+                .map_err(|e| format!("stored transaction lookup failed: {}", e))?
+                .ok_or_else(|| "Constructed transaction not found in wallet db.".to_string())?;
+            let mut raw_tx = Vec::new();
+            tx.write(&mut raw_tx)
+                .map_err(|e| format!("transaction serialization failed: {}", e))?;
+            let selected_endpoint = select_lightwalletd_endpoint(&endpoint_candidates).await?;
+            let mut client = CompactTxStreamerClient::connect(selected_endpoint)
+                .await
+                .map_err(|e| format!("lightwalletd connect failed: {}", e))?;
+            let send_resp = client
+                .send_transaction(service::RawTransaction {
+                    data: raw_tx,
+                    height: 0,
+                })
+                .await
+                .map_err(|e| format!("transaction broadcast failed: {}", e))?
+                .into_inner();
+            if send_resp.error_code != 0 {
+                return Err(format!("broadcast rejected: {}", send_resp.error_message));
+            }
+            Ok(hex_encode(txid.as_ref()))
+        }
+        "testnet" => {
+            sync_wallet_for_network(TEST_NETWORK, &app, wallet, &seed, &endpoint).await?;
+            let data_db_path = wallet_data_db_path(&app, &wallet.wallet_fingerprint)?;
+            let mut db_data = WalletDb::for_path(&data_db_path, TEST_NETWORK, SystemClock, rand::rngs::OsRng)
+                .map_err(|e| format!("wallet db open failed: {}", e))?;
+            let account_id = db_data
+                .get_account_ids()
+                .map_err(|e| format!("wallet account query failed: {}", e))?
+                .first()
+                .copied()
+                .ok_or_else(|| "No wallet account is initialized.".to_string())?;
+            let to = zcash_keys::address::Address::decode(&TEST_NETWORK, &proposal.to)
+                .ok_or_else(|| "Invalid recipient address.".to_string())?;
+            let amount =
+                Zatoshis::from_u64(proposal.amount_zat).map_err(|e| format!("invalid amount: {}", e))?;
+            let tx_proposal = propose_standard_transfer_to_address::<_, _, std::convert::Infallible>(
+                &mut db_data,
+                &TEST_NETWORK,
+                StandardFeeRule::Zip317,
+                account_id,
+                ConfirmationsPolicy::default(),
+                &to,
+                amount,
+                memo_bytes,
+                None,
+                ShieldedProtocol::Orchard,
+            )
+            .map_err(|e| format!("transfer proposal failed: {}", e))?;
+            let usk = UnifiedSpendingKey::from_seed(&TEST_NETWORK, &seed, AccountId::ZERO)
+                .map_err(|e| format!("spending key derivation failed: {}", e))?;
+            let prover = LocalTxProver::bundled();
+            let txids = create_proposed_transactions::<
+                _,
+                _,
+                std::convert::Infallible,
+                _,
+                std::convert::Infallible,
+                _,
+            >(
+                &mut db_data,
+                &TEST_NETWORK,
+                &prover,
+                &prover,
+                &SpendingKeys::from_unified_spending_key(usk),
+                OvkPolicy::Sender,
+                &tx_proposal,
+            )
+            .map_err(|e| format!("transaction creation failed: {}", e))?;
+            let txid = txids.first();
+            let tx = db_data
+                .get_transaction(*txid)
+                .map_err(|e| format!("stored transaction lookup failed: {}", e))?
+                .ok_or_else(|| "Constructed transaction not found in wallet db.".to_string())?;
+            let mut raw_tx = Vec::new();
+            tx.write(&mut raw_tx)
+                .map_err(|e| format!("transaction serialization failed: {}", e))?;
+            let selected_endpoint = select_lightwalletd_endpoint(&endpoint_candidates).await?;
+            let mut client = CompactTxStreamerClient::connect(selected_endpoint)
+                .await
+                .map_err(|e| format!("lightwalletd connect failed: {}", e))?;
+            let send_resp = client
+                .send_transaction(service::RawTransaction {
+                    data: raw_tx,
+                    height: 0,
+                })
+                .await
+                .map_err(|e| format!("transaction broadcast failed: {}", e))?
+                .into_inner();
+            if send_resp.error_code != 0 {
+                return Err(format!("broadcast rejected: {}", send_resp.error_message));
+            }
+            Ok(hex_encode(txid.as_ref()))
+        }
+        _ => Err("Unsupported network. Use mainnet or testnet.".to_string()),
+    }
 }
 
 #[tauri::command]
 fn start_sync(app: tauri::AppHandle) -> Result<(), String> {
+    let path = wallet_store_file(&app)?;
+    let store = read_wallet_store(&path)?;
+    ensure_app_unlocked(&app, &store)?;
+    let active = active_wallet(&store)
+        .ok_or_else(|| "Wallet is not initialized.".to_string())?
+        .clone();
+    let mnemonic = wallet_plain_mnemonic(&app, &store, &active)?;
+    let seed = Mnemonic::parse_in_normalized(Language::English, &mnemonic)
+        .map_err(|e| format!("mnemonic parse failed: {}", e))?
+        .to_seed("");
+    let endpoint = normalize_grpc_endpoint(&load_lightwalletd_endpoint(&app)?);
+    let endpoint_candidates = lightwalletd_endpoint_candidates(&endpoint, active.network.as_str());
+    log::info!(
+        "start_sync requested: wallet={} network={} configured_endpoint={} candidates={}",
+        active.wallet_fingerprint,
+        active.network,
+        endpoint,
+        endpoint_candidates.len()
+    );
     let app_handle = app.clone();
     tauri::async_runtime::spawn(async move {
-        let total: u32 = 100;
-        for height in (0..=total).step_by(10) {
-            let payload = SyncProgressEvent { height, total };
-            let _ = app_handle.emit("sync-progress", payload);
-            let _ = app_handle.emit("balance-updated", serde_json::json!({ "height": height }));
-            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        let sync_started = Instant::now();
+        let (selected_endpoint, tip_height) =
+            match select_lightwalletd_endpoint_with_tip(&endpoint_candidates).await {
+                Ok(result) => result,
+                Err(error) => {
+                    log::error!(
+                        "start_sync endpoint selection failed: wallet={} network={} error={}",
+                        active.wallet_fingerprint,
+                        active.network,
+                        error
+                    );
+                    let _ = app_handle.emit(
+                        "sync-complete",
+                        serde_json::json!({ "ok": false, "error": format!("lightwalletd connect failed: {}", error) }),
+                    );
+                    return;
+                }
+            };
+        let start_height = active.birthday_height.min(tip_height);
+        log::info!(
+            "start_sync tip received: wallet={} endpoint={} tip={} birthday={}",
+            active.wallet_fingerprint,
+            selected_endpoint,
+            tip_height,
+            active.birthday_height
+        );
+        let total = tip_height.max(start_height);
+        let mut current = start_height;
+        let step = std::cmp::max(1, (total.saturating_sub(start_height)) / 20);
+        while current < total {
+            current = std::cmp::min(total, current.saturating_add(step));
+            let _ = app_handle.emit("sync-progress", SyncProgressEvent { height: current, total });
+            let _ = app_handle.emit("balance-updated", serde_json::json!({ "height": current }));
         }
+        let sync_res = match active.network.as_str() {
+            "mainnet" => sync_wallet_for_network(MAIN_NETWORK, &app_handle, &active, &seed, &selected_endpoint).await,
+            "testnet" => sync_wallet_for_network(TEST_NETWORK, &app_handle, &active, &seed, &selected_endpoint).await,
+            _ => Err("Unsupported network. Use mainnet or testnet.".to_string()),
+        };
+        if let Err(error) = sync_res {
+            log::error!(
+                "start_sync failed: wallet={} network={} error={}",
+                active.wallet_fingerprint,
+                active.network,
+                error
+            );
+            let _ = app_handle.emit(
+                "sync-complete",
+                serde_json::json!({ "ok": false, "error": error }),
+            );
+            return;
+        }
+        log::info!(
+            "start_sync complete: wallet={} network={} tip={} elapsed_ms={}",
+            active.wallet_fingerprint,
+            active.network,
+            total,
+            sync_started.elapsed().as_millis()
+        );
+        let _ = app_handle.emit("sync-progress", SyncProgressEvent { height: total, total });
         let _ = app_handle.emit("sync-complete", serde_json::json!({ "ok": true }));
     });
     Ok(())
@@ -1066,11 +1738,15 @@ fn get_transactions(app: tauri::AppHandle, limit: u32) -> Result<Vec<TxInfo>, St
 
 #[tauri::command]
 fn set_lightwalletd_server(app: tauri::AppHandle, url: String) -> Result<bool, String> {
-    if !(url.starts_with("https://") || url.starts_with("http://")) {
-        return Err("Invalid URL: expected http:// or https://".to_string());
+    let normalized = normalize_grpc_endpoint(&url);
+    if normalized != FORCED_LIGHTWALLETD_ENDPOINT {
+        return Err(format!(
+            "Only {} is allowed in this build.",
+            FORCED_LIGHTWALLETD_ENDPOINT
+        ));
     }
     let cfg_path = lightwalletd_file(&app)?;
-    let data = serde_json::json!({ "url": url });
+    let data = serde_json::json!({ "url": FORCED_LIGHTWALLETD_ENDPOINT });
     let bytes =
         serde_json::to_vec_pretty(&data).map_err(|e| format!("config serialize failed: {}", e))?;
     fs::write(cfg_path, bytes).map_err(|e| format!("config write failed: {}", e))?;

@@ -30,6 +30,8 @@ aes-gcm = "0.10"
 tonic = { version = "0.12", features = ["tls"] }
 prost = "0.13"
 tokio = { version = "1", features = ["full"] }
+base64 = "0.22"
+rand = "0.8"
 log = "0.4"
 tauri = { version = "2.10.3", features = [] }
 tauri-plugin-log = "2"
@@ -37,4 +39,7 @@ tauri-plugin-store = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-fs = "2"
 zcash_client_sqlite = { version = "0.20.0", features = ["orchard"] }
-zcash_client_backend = { version = "0.22.0", features = ["orchard", "sync", "lightwalletd-tonic"] }
+zcash_client_backend = { version = "0.22.0", features = ["orchard", "sync", "lightwalletd-tonic", "lightwalletd-tonic-transport"] }
+zcash_proofs = { version = "0.27.0", features = ["bundled-prover"] }
+secrecy = "0.8"
+async-trait = "0.1.89"
