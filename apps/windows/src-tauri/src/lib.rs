@@ -101,11 +101,11 @@ fn derive_real_addresses(normalized_mnemonic: &str, network: &str) -> Result<(St
         let sapling_encoded = ua
             .sapling()
             .map(|addr| ZcashPoolAddress::Sapling(*addr).encode(&TEST_NETWORK))
-            .unwrap_or_default();
+            .ok_or_else(|| "Sapling receiver derivation failed.".to_string())?;
         let transparent_encoded = ua
             .transparent()
             .map(|addr| ZcashPoolAddress::Transparent(*addr).encode(&TEST_NETWORK))
-            .unwrap_or_default();
+            .ok_or_else(|| "Transparent receiver derivation failed.".to_string())?;
         (ua, unified_encoded, sapling_encoded, transparent_encoded)
     } else {
         let usk = UnifiedSpendingKey::from_seed(&MAIN_NETWORK, &seed, account)
@@ -118,11 +118,11 @@ fn derive_real_addresses(normalized_mnemonic: &str, network: &str) -> Result<(St
         let sapling_encoded = ua
             .sapling()
             .map(|addr| ZcashPoolAddress::Sapling(*addr).encode(&MAIN_NETWORK))
-            .unwrap_or_default();
+            .ok_or_else(|| "Sapling receiver derivation failed.".to_string())?;
         let transparent_encoded = ua
             .transparent()
             .map(|addr| ZcashPoolAddress::Transparent(*addr).encode(&MAIN_NETWORK))
-            .unwrap_or_default();
+            .ok_or_else(|| "Transparent receiver derivation failed.".to_string())?;
         (ua, unified_encoded, sapling_encoded, transparent_encoded)
     };
 
