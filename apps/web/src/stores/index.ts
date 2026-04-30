@@ -280,6 +280,7 @@ export const useVaultStore = create<VaultState>()(
 
 // ---------- Settings store ----------
 interface SettingsState {
+  theme: "light" | "dark" | "forest";
   currency: "USD" | "SGD" | "EUR" | "GBP" | "JPY";
   zecDecimals: 2 | 4 | 8;
   lightwalletdEndpoint: string;
@@ -299,6 +300,7 @@ interface SettingsState {
 export const useSettings = create<SettingsState>()(
   persist(
     (set) => ({
+      theme: "light",
       currency: "USD",
       zecDecimals: 4,
       lightwalletdEndpoint: "https://zec.rocks:443",

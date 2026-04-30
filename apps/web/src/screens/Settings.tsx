@@ -117,6 +117,33 @@ export function Settings() {
         </Card>
 
         <Card title="Display">
+          <Row label="Theme" desc={`Current: ${s.theme}`}>
+            <button
+              className="btn btn-ghost"
+              style={{ height: 30, padding: "0 10px" }}
+              onClick={() => {
+                const next =
+                  s.theme === "light" ? "dark" :
+                  s.theme === "dark" ? "forest" :
+                  "light";
+                s.set("theme", next);
+              }}
+            >
+              Toggle
+            </button>
+          </Row>
+          <div className="hstack gap-8" style={{ marginTop: 10, marginBottom: 12, flexWrap: "wrap" }}>
+            {(["light", "dark", "forest"] as const).map((theme) => (
+              <button
+                key={theme}
+                className={`btn ${s.theme === theme ? "btn-primary" : "btn-secondary"}`}
+                style={{ height: 32, padding: "0 12px" }}
+                onClick={() => s.set("theme", theme)}
+              >
+                {theme[0].toUpperCase() + theme.slice(1)}
+              </button>
+            ))}
+          </div>
           <label className="label">Currency</label>
           <select className="input" value={s.currency} onChange={(e) => s.set("currency", e.target.value as never)}>
             {["USD", "SGD", "EUR", "GBP", "JPY"].map((c) => <option key={c}>{c}</option>)}

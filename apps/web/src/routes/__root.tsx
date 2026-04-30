@@ -55,10 +55,16 @@ function RootShell({ children }: { children: React.ReactNode }) {
 
 function AppShell() {
   const onboardingComplete = useSettings((s) => s.onboardingComplete);
+  const theme = useSettings((s) => s.theme);
   const setWallets = useWalletStore((s) => s.setWallets);
   const [mounted, setMounted] = useState(false);
   const [lockConfigured, setLockConfigured] = useState(false);
   const [appLocked, setAppLocked] = useState(false);
+
+  useEffect(() => {
+    if (typeof document === "undefined") return;
+    document.documentElement.setAttribute("data-theme", theme);
+  }, [theme]);
 
   useEffect(() => {
     let ignore = false;
