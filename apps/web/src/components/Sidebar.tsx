@@ -16,6 +16,7 @@ export function Sidebar() {
   const setSyncStatus = useWalletStore((s) => s.setSyncStatus);
   const setSyncMetrics = useWalletStore((s) => s.setSyncMetrics);
   const setBalances = useWalletStore((s) => s.setBalances);
+  const setMarketData = useWalletStore((s) => s.setMarketData);
   const walletApi = useWallet();
   const syncInFlight = useRef(false);
   const activeVaultCount = vaults.filter(
@@ -54,6 +55,29 @@ export function Sidebar() {
       }
     };
 
+    const refreshMarketPrice = async () => {
+      try {
+        const res = await fetch(
+          "https://api.coingecko.com/api/v3/simple/price?ids=zcash&vs_currencies=usd&include_24hr_change=true",
+          { cache: "no-store" },
+        );
+        if (!res.ok) return;
+        const json = (await res.json()) as {
+          zcash?: { usd?: number; usd_24h_change?: number };
+        };
+        const usd = json.zcash?.usd;
+        const change24h = json.zcash?.usd_24h_change;
+        if (typeof usd !== "number" || Number.isNaN(usd)) return;
+        setMarketData({
+          zecUsdPrice: usd,
+          priceChange24h:
+            typeof change24h === "number" && !Number.isNaN(change24h) ? change24h : 0,
+        });
+      } catch {
+        // Keep previous market values on transient fetch failures.
+      }
+    };
+
     const startSyncCycle = async () => {
       if (syncInFlight.current) return;
       syncInFlight.current = true;
@@ -86,18 +110,24 @@ export function Sidebar() {
     };
 
     void startSyncCycle();
+    void refreshMarketPrice();
     const timer = setInterval(() => {
       if (stopped) return;
       void startSyncCycle();
     }, 30_000);
+    const priceTimer = setInterval(() => {
+      if (stopped) return;
+      void refreshMarketPrice();
+    }, 60_000);
 
     return () => {
       stopped = true;
       syncInFlight.current = false;
       clearInterval(timer);
+      clearInterval(priceTimer);
       dispose();
     };
-  }, [setBalances, setSyncMetrics, setSyncStatus]);
+  }, [setBalances, setMarketData, setSyncMetrics, setSyncStatus]);
 
   return (
     <aside className="sidebar">

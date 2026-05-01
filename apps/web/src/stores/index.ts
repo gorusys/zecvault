@@ -82,6 +82,7 @@ interface WalletState {
   setSyncStatus: (s: SyncStatus) => void;
   setSyncMetrics: (input: { syncProgress: number; syncBlock: number }) => void;
   setBalances: (input: { totalZat: number; spendableZat: number; pendingZat: number }) => void;
+  setMarketData: (input: { zecUsdPrice: number; priceChange24h: number }) => void;
 }
 
 export const useWalletStore = create<WalletState>()(
@@ -210,6 +211,10 @@ export const useWalletStore = create<WalletState>()(
         totalZat,
         spendableZat,
         pendingZat,
+      }),
+      setMarketData: ({ zecUsdPrice, priceChange24h }) => set({
+        zecUsdPrice,
+        priceChange24h,
       }),
     }),
     { name: "zecvault-wallet", storage: createJSONStorage(() => localStorage) },
