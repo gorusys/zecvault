@@ -43,7 +43,7 @@ export function Send() {
   }
 
   return (
-    <div className="fade-in" style={{ maxWidth: 560, margin: "0 auto" }}>
+    <div className="fade-in">
       <h1 className="t-h1" style={{ marginBottom: 24 }}>Send ZEC</h1>
       <div className="card card-pad" style={{ padding: 28 }}>
         <label className="label">Recipient address</label>

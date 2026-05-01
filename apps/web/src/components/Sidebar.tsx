@@ -133,7 +133,7 @@ export function Sidebar() {
     <aside className="sidebar">
       <div className="sidebar-logo">
         <div className="sidebar-logo-icon" aria-hidden="true">
-          <Icon name="owl" size={20} />
+          <Icon name="owl" size={30} />
         </div>
         <div className="sidebar-logo-text">
           <span className="sidebar-logo-name">ZecVault</span>

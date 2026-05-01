@@ -56,7 +56,7 @@ export function Wallets() {
   }
 
   return (
-    <div className="fade-in" style={{ maxWidth: 900 }}>
+    <div className="fade-in">
       <div className="hstack between" style={{ marginBottom: 20 }}>
         <div>
           <div className="t-caption text-gray-400">Wallet management</div>

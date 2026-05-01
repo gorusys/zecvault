@@ -37,7 +37,7 @@ export function Receive() {
   }
 
   return (
-    <div className="fade-in" style={{ maxWidth: 440, margin: "0 auto" }}>
+    <div className="fade-in">
       <h1 className="t-h1" style={{ marginBottom: 24 }}>Receive ZEC</h1>
       <div className="card" style={{ padding: 32, textAlign: "center" }}>
         <div className="hstack gap-4" style={{ background: "var(--gray-25)", border: "1px solid var(--gray-100)", borderRadius: "var(--r-pill)", padding: 4, justifyContent: "center", marginBottom: 24 }}>
