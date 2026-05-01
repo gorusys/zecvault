@@ -124,7 +124,14 @@ export function Onboarding() {
         }
         try {
           setSubmitting(true);
-          const finalized = await finalizeCreateWalletNative(seed.join(" "), network, walletPassword, undefined, createdDraftId);
+          const finalized = await finalizeCreateWalletNative(
+            seed.join(" "),
+            network,
+            walletPassword,
+            undefined,
+            createdDraftId,
+            name.trim(),
+          );
           if (!finalized.ok || !finalized.snapshot) {
             toast({ type: "danger", title: "Wallet creation failed", description: finalized.error ?? "Could not finalize wallet creation." });
             return;
@@ -140,7 +147,7 @@ export function Onboarding() {
       } else {
         try {
           setSubmitting(true);
-          const restored = await restoreWalletNative(recoverNormalized, network, walletPassword);
+          const restored = await restoreWalletNative(recoverNormalized, network, walletPassword, undefined, name.trim());
           if (!restored.ok) {
             toast({ type: "danger", title: "Invalid seed phrase", description: restored.error ?? "Please check your 24 words and try again." });
             return;

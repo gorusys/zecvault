@@ -532,11 +532,17 @@ fn derive_real_addresses(normalized_mnemonic: &str, network: &str) -> Result<(St
         let sapling_encoded = ua
             .sapling()
             .map(|addr| ZcashPoolAddress::Sapling(*addr).encode(&TEST_NETWORK))
-            .ok_or_else(|| "Sapling receiver derivation failed.".to_string())?;
+            .unwrap_or_else(|| {
+                log::warn!("wallet address derivation: sapling receiver missing for testnet default UA");
+                String::new()
+            });
         let transparent_encoded = ua
             .transparent()
             .map(|addr| ZcashPoolAddress::Transparent(*addr).encode(&TEST_NETWORK))
-            .ok_or_else(|| "Transparent receiver derivation failed.".to_string())?;
+            .unwrap_or_else(|| {
+                log::warn!("wallet address derivation: transparent receiver missing for testnet default UA");
+                String::new()
+            });
         (ua, unified_encoded, sapling_encoded, transparent_encoded)
     } else {
         let usk = UnifiedSpendingKey::from_seed(&MAIN_NETWORK, &seed, account)
@@ -549,11 +555,17 @@ fn derive_real_addresses(normalized_mnemonic: &str, network: &str) -> Result<(St
         let sapling_encoded = ua
             .sapling()
             .map(|addr| ZcashPoolAddress::Sapling(*addr).encode(&MAIN_NETWORK))
-            .ok_or_else(|| "Sapling receiver derivation failed.".to_string())?;
+            .unwrap_or_else(|| {
+                log::warn!("wallet address derivation: sapling receiver missing for mainnet default UA");
+                String::new()
+            });
         let transparent_encoded = ua
             .transparent()
             .map(|addr| ZcashPoolAddress::Transparent(*addr).encode(&MAIN_NETWORK))
-            .ok_or_else(|| "Transparent receiver derivation failed.".to_string())?;
+            .unwrap_or_else(|| {
+                log::warn!("wallet address derivation: transparent receiver missing for mainnet default UA");
+                String::new()
+            });
         (ua, unified_encoded, sapling_encoded, transparent_encoded)
     };
 
@@ -1764,6 +1776,21 @@ pub fn run() {
                 .level(log::LevelFilter::Info)
                 .build(),
         )
+        .setup(|app| {
+            if let Some(window) = app.get_webview_window("main") {
+                match tauri::image::Image::from_bytes(include_bytes!("../icons/32x32.png")) {
+                    Ok(icon) => {
+                        if let Err(err) = window.set_icon(icon) {
+                            log::warn!("failed to apply custom window icon: {}", err);
+                        }
+                    }
+                    Err(err) => {
+                        log::warn!("failed to load custom window icon bytes: {}", err);
+                    }
+                }
+            }
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             wallet_create,
             wallet_finalize_create,
