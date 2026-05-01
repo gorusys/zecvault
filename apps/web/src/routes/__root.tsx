@@ -3,8 +3,9 @@ import { useEffect, useState } from "react";
 import appCss from "../styles.css?url";
 import { Sidebar } from "@/components/Sidebar";
 import { ToastStack } from "@/components/ToastStack";
+import { getAppLockStateNative, listWalletsNative, unlockAppNative } from "@/lib/wallet-native";
 import { Onboarding } from "@/screens/Onboarding";
-import { useSettings, useVaultStore, useWalletStore } from "@/stores";
+import { useSettings, useWalletStore } from "@/stores";
 
 function NotFoundComponent() {
   return (
@@ -54,17 +55,60 @@ function RootShell({ children }: { children: React.ReactNode }) {
 
 function AppShell() {
   const onboardingComplete = useSettings((s) => s.onboardingComplete);
-  const ensureSeeded = useVaultStore((s) => s.ensureSeeded);
-  const initialize = useWalletStore((s) => s.initialize);
+  const theme = useSettings((s) => s.theme);
+  const setWallets = useWalletStore((s) => s.setWallets);
   const [mounted, setMounted] = useState(false);
+  const [lockConfigured, setLockConfigured] = useState(false);
+  const [appLocked, setAppLocked] = useState(false);
 
   useEffect(() => {
-    initialize();
-    ensureSeeded();
-    setMounted(true);
-  }, [initialize, ensureSeeded]);
+    if (typeof document === "undefined") return;
+    document.documentElement.setAttribute("data-theme", theme);
+  }, [theme]);
+
+  useEffect(() => {
+    let ignore = false;
+    const bootstrap = async () => {
+      try {
+        const lock = await getAppLockStateNative();
+        if (ignore) return;
+        setLockConfigured(lock.configured);
+        setAppLocked(lock.locked);
+        if (!lock.locked) {
+          const nativeState = await listWalletsNative();
+          if (!ignore) setWallets(nativeState.wallets, nativeState.activeWalletFingerprint);
+        }
+      } finally {
+        if (!ignore) {
+          setMounted(true);
+        }
+      }
+    };
+    void bootstrap();
+    return () => {
+      ignore = true;
+    };
+  }, [setWallets]);
 
   if (!mounted) return null;
+
+  if (onboardingComplete && lockConfigured && appLocked) {
+    return (
+      <>
+        <AppUnlockScreen
+          onUnlock={async (password) => {
+            const ok = await unlockAppNative(password);
+            if (!ok) return false;
+            const nativeState = await listWalletsNative();
+            setWallets(nativeState.wallets, nativeState.activeWalletFingerprint);
+            setAppLocked(false);
+            return true;
+          }}
+        />
+        <ToastStack />
+      </>
+    );
+  }
 
   if (!onboardingComplete) {
     return (<><Onboarding /><ToastStack /></>);
@@ -77,6 +121,53 @@ function AppShell() {
         <main className="main-content"><Outlet /></main>
       </div>
       <ToastStack />
+    </div>
+  );
+}
+
+function AppUnlockScreen({ onUnlock }: { onUnlock: (password: string) => Promise<boolean> }) {
+  const [password, setPassword] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  return (
+    <div style={{ minHeight: "100vh", display: "grid", placeItems: "center", background: "var(--gray-50)" }}>
+      <div className="card card-pad" style={{ width: "100%", maxWidth: 420 }}>
+        <h1 className="t-h2">Unlock ZecVault</h1>
+        <p className="t-body text-gray-600" style={{ marginTop: 8 }}>
+          Enter your app password to access wallets.
+        </p>
+        <label className="label" style={{ marginTop: 16 }}>App password</label>
+        <input
+          type="password"
+          className="input"
+          value={password}
+          onChange={(e) => setPassword(e.target.value)}
+          placeholder="Enter password"
+        />
+        {error && <div className="t-caption" style={{ marginTop: 8, color: "var(--danger-text)" }}>{error}</div>}
+        <button
+          className="btn btn-primary btn-block"
+          style={{ marginTop: 14 }}
+          disabled={!password || busy}
+          onClick={async () => {
+            try {
+              setBusy(true);
+              setError(null);
+              const ok = await onUnlock(password);
+              if (!ok) {
+                setError("Invalid password.");
+                return;
+              }
+              setPassword("");
+            } finally {
+              setBusy(false);
+            }
+          }}
+        >
+          {busy ? "Unlocking..." : "Unlock"}
+        </button>
+      </div>
     </div>
   );
 }

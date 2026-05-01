@@ -9,14 +9,14 @@ export interface CategoryDef {
 }
 
 export const CATEGORIES: CategoryDef[] = [
-  { id: "trip",   name: "Travel",     emoji: "✈️" },
-  { id: "ring",   name: "Ring",       emoji: "💍" },
-  { id: "house",  name: "Home",       emoji: "🏡" },
-  { id: "car",    name: "Car",        emoji: "🚗" },
-  { id: "emer",   name: "Emergency",  emoji: "🛡️" },
-  { id: "gift",   name: "Gift",       emoji: "🎁" },
-  { id: "edu",    name: "Education",  emoji: "🎓" },
-  { id: "tech",   name: "Tech",       emoji: "💻" },
+  { id: "trip",   name: "Experiences",      emoji: "🌍" },
+  { id: "ring",   name: "Wedding",          emoji: "💒" },
+  { id: "house",  name: "Home Upgrade",     emoji: "🏠" },
+  { id: "car",    name: "EV Fund",          emoji: "🔋" },
+  { id: "emer",   name: "Safety Buffer",    emoji: "🧯" },
+  { id: "gift",   name: "Family Moments",   emoji: "🧸" },
+  { id: "edu",    name: "Skills & Courses", emoji: "📚" },
+  { id: "tech",   name: "Creator + AI Gear",emoji: "🤖" },
   { id: "custom", name: "Custom",     emoji: "🎯" },
 ];
 

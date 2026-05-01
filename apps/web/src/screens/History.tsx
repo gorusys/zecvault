@@ -9,10 +9,15 @@ const TABS = ["All", "Vaults", "Received", "Sent", "Memos"] as const;
 export function History() {
   const txHistory = useWalletStore((s) => s.txHistory);
   const vaults = useVaultStore((s) => s.vaults);
+  const archive = useVaultStore((s) => s.archive);
+  const activeWalletFingerprint = useWalletStore((s) => s.activeWalletFingerprint);
+  const fallbackWalletFingerprint = useWalletStore((s) => s.walletFingerprint);
+  const activeWalletKey = activeWalletFingerprint || fallbackWalletFingerprint;
   const [tab, setTab] = useState<typeof TABS[number]>("All");
   const [q, setQ] = useState("");
 
   const filtered = useMemo(() => txHistory.filter((tx) => {
+    if (tx.walletFingerprint && tx.walletFingerprint !== activeWalletKey) return false;
     if (tab === "Vaults" && !tx.type.startsWith("vault")) return false;
     if (tab === "Received" && tx.type !== "received") return false;
     if (tab === "Sent" && tx.type !== "sent") return false;
@@ -22,7 +27,7 @@ export function History() {
       return (tx.toAddress?.toLowerCase().includes(s) || tx.memo?.toLowerCase().includes(s) || fmtZec(Math.abs(tx.amountZat)).includes(s));
     }
     return true;
-  }), [txHistory, tab, q]);
+  }), [txHistory, tab, q, activeWalletKey]);
 
   return (
     <div className="fade-in">
@@ -50,7 +55,7 @@ export function History() {
         ) : filtered.map((tx) => {
           const isReceived = tx.type === "received";
           const isVault = tx.type.startsWith("vault");
-          const vault = isVault ? vaults.find((v) => v.id === tx.vaultId) : null;
+          const vault = isVault ? [...vaults, ...archive].find((v) => v.id === tx.vaultId) : null;
           const cat = vault ? categoryOf(vault.category) : null;
           const color = isReceived ? "var(--success-strong)" : isVault ? "#4FA3E3" : "var(--coral-400)";
           return (

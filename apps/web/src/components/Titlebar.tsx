@@ -5,7 +5,7 @@ export function Titlebar() {
     <div className="titlebar" role="banner">
       <div className="titlebar-left">
         <div className="titlebar-icon" aria-hidden="true">
-          <Icon name="pig" size={11} />
+          <Icon name="owl" size={11} />
         </div>
         <span className="titlebar-title">ZecVault</span>
       </div>

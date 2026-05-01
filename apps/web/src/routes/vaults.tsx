@@ -1,6 +1,9 @@
-import { createFileRoute } from "@tanstack/react-router";
-import { Vaults } from "@/screens/Vaults";
+import { Outlet, createFileRoute } from "@tanstack/react-router";
 
 export const Route = createFileRoute("/vaults")({
-  component: Vaults,
+  component: VaultsLayout,
 });
+
+function VaultsLayout() {
+  return <Outlet />;
+}

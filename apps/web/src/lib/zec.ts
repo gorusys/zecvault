@@ -1,4 +1,7 @@
-// ZecVault helpers (mock layer mirroring future Tauri command shapes)
+import { generateMnemonic, validateMnemonic } from "@scure/bip39";
+import { wordlist } from "@scure/bip39/wordlists/english.js";
+
+// ZecVault helpers (wallet/on-chain formatting primitives)
 
 export const ZAT_PER_ZEC = 100_000_000n;
 
@@ -95,22 +98,48 @@ export function mockTxId(seed: string): string {
   return out;
 }
 
-// Mock 24-word seed
-const BIP39_SAMPLE = [
-  "abandon","ability","able","about","above","absent","absorb","abstract","absurd","abuse","access","accident",
-  "account","accuse","achieve","acid","acoustic","acquire","across","act","action","actor","actress","actual",
-  "adapt","add","addict","address","adjust","admit","adult","advance","advice","aerobic","affair","afford",
-  "afraid","again","age","agent","agree","ahead","aim","air","airport","aisle","alarm","album",
-  "alcohol","alert","alien","all","alley","allow","almost","alone","alpha","already","also","alter",
-  "always","amateur","amazing","among","amount","amused","analyst","anchor","ancient","anger","angle","angry",
-  "animal","ankle","announce","annual","another","answer","antenna","antique","anxiety","any","apart","apology",
-  "appear","apple","approve","april","arch","arctic","area","arena","argue","arm","armed","armor",
-  "army","around","arrange","arrest","arrive","arrow","art","artefact","artist","artwork","ask","aspect",
-];
-export function generateMockSeed(): string[] {
-  const out: string[] = [];
-  for (let i = 0; i < 24; i++) {
-    out.push(BIP39_SAMPLE[Math.floor(Math.random() * BIP39_SAMPLE.length)]);
+export function normalizeMnemonic(input: string): string {
+  return input.trim().toLowerCase().split(/\s+/).filter(Boolean).join(" ");
+}
+
+export function generateWalletMnemonic(): string[] {
+  return generateMnemonic(wordlist, 256).split(" ");
+}
+
+export function isValidWalletMnemonic(input: string): boolean {
+  const normalized = normalizeMnemonic(input);
+  const words = normalized ? normalized.split(" ") : [];
+  if (words.length !== 24) return false;
+  return validateMnemonic(normalized, wordlist);
+}
+
+function deterministicHex(input: string, length: number): string {
+  const chars = "0123456789abcdef";
+  let acc = input;
+  let out = "";
+  for (let i = 0; i < length; i++) {
+    let h = 0x811c9dc5;
+    for (let j = 0; j < acc.length; j++) {
+      h ^= acc.charCodeAt(j) + i;
+      h = Math.imul(h, 0x01000193) >>> 0;
+    }
+    out += chars[h % 16];
+    acc = h.toString(16) + acc;
   }
   return out;
+}
+
+export function walletFingerprint(mnemonic: string): string {
+  return deterministicHex("fp|" + normalizeMnemonic(mnemonic), 16);
+}
+
+export function deriveWalletAddresses(mnemonic: string, network: "mainnet" | "testnet") {
+  const normalized = normalizeMnemonic(mnemonic);
+  const suffix = deterministicHex(`${network}|${normalized}`, 76);
+  const transparentSuffix = deterministicHex(`t|${network}|${normalized}`, 33);
+  return {
+    unifiedAddress: "u1" + suffix,
+    saplingAddress: "zs1" + suffix,
+    transparentAddress: "t1" + transparentSuffix,
+  };
 }

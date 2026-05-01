@@ -2,21 +2,29 @@ import { useParams, Link } from "@tanstack/react-router";
 import { useState } from "react";
 import { useVaultStore, useWalletStore } from "@/stores";
 import { categoryOf } from "@/lib/categories";
-import { fmtZec, fmtDate, daysBetween, truncateAddress, formatRelativeTime } from "@/lib/zec";
+import { fmtZec, fmtDate, daysBetween, truncateAddress, formatRelativeTime, mockTxId } from "@/lib/zec";
 import { Icon } from "@/components/Icon";
 import { Drawer } from "@/components/Drawer";
 import { toast } from "@/stores/toast";
 import { GoalComplete } from "./GoalComplete";
+import { setActiveWalletNative } from "@/lib/wallet-native";
+import { useWallet } from "@/hooks/useWallet";
 
 export function VaultDetailView({ vaultId }: { vaultId: string }) {
   const vault = useVaultStore((s) => s.vaults.find((v) => v.id === vaultId) ?? s.archive.find((v) => v.id === vaultId));
   const txHistory = useWalletStore((s) => s.txHistory);
+  const wallets = useWalletStore((s) => s.wallets);
+  const activeWalletFingerprint = useWalletStore((s) => s.activeWalletFingerprint);
+  const fallbackWalletFingerprint = useWalletStore((s) => s.walletFingerprint);
+  const setActiveWallet = useWalletStore((s) => s.setActiveWallet);
+  const addTx = useWalletStore((s) => s.addTx);
   const deposit = useVaultStore((s) => s.deposit);
   const requestBreak = useVaultStore((s) => s.requestBreak);
   const completeVault = useVaultStore((s) => s.completeVault);
   const [showBreak, setShowBreak] = useState(false);
   const [showDeposit, setShowDeposit] = useState(false);
   const [showComplete, setShowComplete] = useState(false);
+  const walletApi = useWallet();
 
   if (!vault) {
     return (
@@ -34,6 +42,8 @@ export function VaultDetailView({ vaultId }: { vaultId: string }) {
   const dailyNeeded = days > 0 ? remaining / 1e8 / days : 0;
   const onPace = pct >= ((Date.now() - vault.createdTs) / (vault.deadlineTs - vault.createdTs)) * 100;
   const vaultTxs = txHistory.filter((tx) => tx.vaultId === vault.id);
+  const currentActiveWallet = activeWalletFingerprint || fallbackWalletFingerprint;
+  const vaultWalletFingerprint = vault.walletFingerprint || currentActiveWallet;
 
   const C = 2 * Math.PI * 52;
 
@@ -156,7 +166,106 @@ export function VaultDetailView({ vaultId }: { vaultId: string }) {
         <Drawer open onClose={() => setShowDeposit(false)} width={420}>
           <div className="drawer-body">
             <h2 className="t-h2">Deposit to {vault.goalName}</h2>
-            <DepositForm onSubmit={(amt) => { deposit(vault.id, amt); toast({ type: "success", title: "Deposit confirmed", description: `${fmtZec(amt)} ZEC sealed in vault.` }); setShowDeposit(false); if ((vault.currentBalanceZat + amt) >= vault.targetZat) setShowComplete(true); }} />
+            <DepositForm
+              wallets={wallets}
+              defaultSourceWalletFingerprint={currentActiveWallet || vaultWalletFingerprint}
+              vaultWalletFingerprint={vaultWalletFingerprint}
+              onSubmit={async ({ amountZat, memo, sourceWalletFingerprint }) => {
+                if (!Number.isFinite(amountZat) || amountZat <= 0) {
+                  toast({ type: "danger", title: "Invalid amount", description: "Amount must be greater than zero." });
+                  return;
+                }
+                const sourceWallet = wallets.find((w) => w.walletFingerprint === sourceWalletFingerprint);
+                if (!sourceWallet) {
+                  toast({ type: "danger", title: "Invalid source wallet", description: "Selected source wallet was not found." });
+                  return;
+                }
+                const originalActive = currentActiveWallet;
+                const memoText = memo.trim();
+
+                let currentWalletFingerprint = originalActive;
+                let switchedAwayFromOriginal = false;
+                const switchActive = async (walletFingerprint: string) => {
+                  if (!walletFingerprint || walletFingerprint === currentWalletFingerprint) return;
+                  const resp = await setActiveWalletNative(walletFingerprint);
+                  if (!resp.ok) throw new Error(resp.error ?? "Could not switch wallet.");
+                  setActiveWallet(walletFingerprint);
+                  currentWalletFingerprint = walletFingerprint;
+                  if (originalActive && walletFingerprint !== originalActive) {
+                    switchedAwayFromOriginal = true;
+                  }
+                };
+
+                try {
+                  if (sourceWalletFingerprint === vaultWalletFingerprint && memoText.length === 0) {
+                    deposit(vault.id, amountZat);
+                    toast({
+                      type: "success",
+                      title: "Deposit confirmed",
+                      description: `${fmtZec(amountZat)} ZEC locked in this vault (no transfer fee).`,
+                    });
+                  } else {
+                    if (sourceWalletFingerprint === vaultWalletFingerprint && memoText.length > 0) {
+                      const proceed = window.confirm(
+                        "Adding a memo requires an on-chain self-transfer and network fee. Continue?",
+                      );
+                      if (!proceed) return;
+                    }
+                    await switchActive(sourceWalletFingerprint);
+                    const txid = await walletApi.sendZec(
+                      vault.shieldedAddress,
+                      amountZat,
+                      memoText || undefined,
+                    );
+                    // Source wallet transfer record.
+                    addTx({
+                      id: txid || mockTxId(`send|${sourceWalletFingerprint}|${vault.id}`),
+                      type: "sent",
+                      amountZat: -Math.abs(amountZat),
+                      walletFingerprint: sourceWalletFingerprint,
+                      toAddress: vault.shieldedAddress,
+                      memo: memoText || undefined,
+                      vaultId: vault.id,
+                      blockHeight: 0,
+                      feeZat: 10_000,
+                      timestamp: Date.now(),
+                    });
+                    // Vault funding record (visible under vault wallet context/history).
+                    addTx({
+                      id: mockTxId(`vault|${vaultWalletFingerprint}|${vault.id}|${Date.now()}`),
+                      type: "vault-deposit",
+                      amountZat: Math.abs(amountZat),
+                      walletFingerprint: vaultWalletFingerprint,
+                      fromAddress: sourceWallet.unifiedAddress,
+                      memo: memoText || undefined,
+                      vaultId: vault.id,
+                      blockHeight: 0,
+                      feeZat: memoText ? 10_000 : 0,
+                      timestamp: Date.now(),
+                    });
+                    deposit(vault.id, amountZat);
+                    toast({
+                      type: "success",
+                      title: "Deposit transfer confirmed",
+                      description: `${fmtZec(amountZat)} ZEC deposited from ${sourceWallet.walletName?.trim() || "selected wallet"}.`,
+                    });
+                  }
+                  setShowDeposit(false);
+                  if ((vault.currentBalanceZat + amountZat) >= vault.targetZat) setShowComplete(true);
+                } catch (error) {
+                  const detail = error instanceof Error ? error.message : "Could not process deposit.";
+                  toast({ type: "danger", title: "Deposit failed", description: detail });
+                } finally {
+                  if (originalActive && switchedAwayFromOriginal) {
+                    try {
+                      await switchActive(originalActive);
+                    } catch {
+                      // Keep current wallet active if restore fails; app remains functional.
+                    }
+                  }
+                }
+              }}
+            />
           </div>
         </Drawer>
       )}
@@ -170,14 +279,77 @@ export function VaultDetail() {
   return <VaultDetailView vaultId={vaultId} />;
 }
 
-function DepositForm({ onSubmit }: { onSubmit: (zat: number) => void }) {
+function DepositForm({
+  wallets,
+  defaultSourceWalletFingerprint,
+  vaultWalletFingerprint,
+  onSubmit,
+}: {
+  wallets: Array<{ walletFingerprint: string; walletName?: string; unifiedAddress: string }>;
+  defaultSourceWalletFingerprint: string;
+  vaultWalletFingerprint: string;
+  onSubmit: (input: { amountZat: number; memo: string; sourceWalletFingerprint: string }) => Promise<void>;
+}) {
   const [amt, setAmt] = useState("1");
+  const [memo, setMemo] = useState("");
+  const [sourceWalletFingerprint, setSourceWalletFingerprint] = useState(defaultSourceWalletFingerprint || vaultWalletFingerprint);
+  const [submitting, setSubmitting] = useState(false);
+  const selectedWallet = wallets.find((w) => w.walletFingerprint === sourceWalletFingerprint);
+  const sameWallet = sourceWalletFingerprint === vaultWalletFingerprint;
   return (
     <div style={{ marginTop: 24 }}>
       <label className="label">Amount (ZEC)</label>
       <input className="input mono" type="number" value={amt} onChange={(e) => setAmt(e.target.value)} />
-      <button className="btn btn-primary btn-lg btn-block" style={{ marginTop: 20 }} onClick={() => onSubmit(parseFloat(amt) * 1e8)}>
-        Deposit {amt} ZEC
+      <label className="label" style={{ marginTop: 12 }}>Deposit from wallet</label>
+      <select
+        className="input"
+        value={sourceWalletFingerprint}
+        onChange={(e) => setSourceWalletFingerprint(e.target.value)}
+      >
+        {wallets.map((w) => (
+          <option key={w.walletFingerprint} value={w.walletFingerprint}>
+            {(w.walletName?.trim() || w.walletFingerprint)} {w.walletFingerprint === vaultWalletFingerprint ? "(vault wallet)" : ""}
+          </option>
+        ))}
+      </select>
+
+      <label className="label" style={{ marginTop: 12 }}>Memo (optional)</label>
+      <textarea
+        className="input"
+        value={memo}
+        onChange={(e) => setMemo(e.target.value.slice(0, 500))}
+        maxLength={500}
+        placeholder="Leave blank for no on-chain memo"
+      />
+      {sameWallet && memo.trim().length > 0 && (
+        <div className="t-caption" style={{ marginTop: 8, color: "var(--warning-text)" }}>
+          Memo deposit uses self-transfer and incurs network fee.
+        </div>
+      )}
+      {!sameWallet && (
+        <div className="t-caption text-gray-400" style={{ marginTop: 8 }}>
+          Cross-wallet deposits are processed as transfer transactions from {selectedWallet?.walletName?.trim() || "selected wallet"}.
+        </div>
+      )}
+
+      <button
+        className="btn btn-primary btn-lg btn-block"
+        style={{ marginTop: 20 }}
+        disabled={!amt || Number(amt) <= 0 || !sourceWalletFingerprint || submitting}
+        onClick={async () => {
+          try {
+            setSubmitting(true);
+            await onSubmit({
+              amountZat: parseFloat(amt) * 1e8,
+              memo,
+              sourceWalletFingerprint,
+            });
+          } finally {
+            setSubmitting(false);
+          }
+        }}
+      >
+        {submitting ? "Processing..." : `Deposit ${amt} ZEC`}
       </button>
     </div>
   );

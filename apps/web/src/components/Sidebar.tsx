@@ -1,22 +1,36 @@
 import { Link, useRouterState } from "@tanstack/react-router";
+import { useEffect, useRef } from "react";
 import { Icon, type IconName } from "./Icon";
 import { useVaultStore, useWalletStore } from "@/stores";
+import { useWallet } from "@/hooks/useWallet";
 
 interface NavDef { to: string; icon: IconName; label: string; section: "Main" | "Account"; badge?: number; }
 
 export function Sidebar() {
   const { location } = useRouterState();
   const vaults = useVaultStore((s) => s.vaults);
+  const activeWalletFingerprint = useWalletStore((s) => s.activeWalletFingerprint);
+  const fallbackWalletFingerprint = useWalletStore((s) => s.walletFingerprint);
   const syncStatus = useWalletStore((s) => s.syncStatus);
   const syncBlock = useWalletStore((s) => s.syncBlock);
+  const setSyncStatus = useWalletStore((s) => s.setSyncStatus);
+  const setSyncMetrics = useWalletStore((s) => s.setSyncMetrics);
+  const setBalances = useWalletStore((s) => s.setBalances);
+  const setMarketData = useWalletStore((s) => s.setMarketData);
+  const walletApi = useWallet();
+  const syncInFlight = useRef(false);
+  const activeVaultCount = vaults.filter(
+    (v) => (v.walletFingerprint || (activeWalletFingerprint || fallbackWalletFingerprint)) === (activeWalletFingerprint || fallbackWalletFingerprint),
+  ).length;
 
   const items: NavDef[] = [
     { to: "/", icon: "home", label: "Dashboard", section: "Main" },
-    { to: "/vaults" as const, icon: "vault", label: "Vaults", section: "Main", badge: vaults.length || undefined },
+    { to: "/wallets" as const, icon: "wallet", label: "Wallets", section: "Main" },
+    { to: "/vaults" as const, icon: "vault", label: "Vaults", section: "Main", badge: activeVaultCount || undefined },
     { to: "/send" as const, icon: "send", label: "Send", section: "Main" },
     { to: "/receive" as const, icon: "receive", label: "Receive", section: "Main" },
     { to: "/history" as const, icon: "history", label: "History", section: "Main" },
-    { to: "/settings" as const, icon: "settings", label: "Settings", section: "Account" },
+    { to: "/settings" as const, icon: "shield", label: "Settings", section: "Account" },
   ];
 
   const isActive = (to: string) =>
@@ -27,11 +41,99 @@ export function Sidebar() {
     Account: items.filter((i) => i.section === "Account"),
   };
 
+  useEffect(() => {
+    let dispose = () => {};
+    let stopped = false;
+
+    const refreshBalance = async () => {
+      try {
+        const bal = await walletApi.getBalance();
+        const total = bal.orchardZat + bal.saplingZat + bal.transparentZat;
+        setBalances({ totalZat: total, spendableZat: total, pendingZat: bal.pendingZat });
+      } catch {
+        // Keep previous values on transient network/native errors.
+      }
+    };
+
+    const refreshMarketPrice = async () => {
+      try {
+        const res = await fetch(
+          "https://api.coingecko.com/api/v3/simple/price?ids=zcash&vs_currencies=usd&include_24hr_change=true",
+          { cache: "no-store" },
+        );
+        if (!res.ok) return;
+        const json = (await res.json()) as {
+          zcash?: { usd?: number; usd_24h_change?: number };
+        };
+        const usd = json.zcash?.usd;
+        const change24h = json.zcash?.usd_24h_change;
+        if (typeof usd !== "number" || Number.isNaN(usd)) return;
+        setMarketData({
+          zecUsdPrice: usd,
+          priceChange24h:
+            typeof change24h === "number" && !Number.isNaN(change24h) ? change24h : 0,
+        });
+      } catch {
+        // Keep previous market values on transient fetch failures.
+      }
+    };
+
+    const startSyncCycle = async () => {
+      if (syncInFlight.current) return;
+      syncInFlight.current = true;
+      try {
+        dispose();
+        dispose = await walletApi.startSync(
+          (progress) => {
+            const pct = progress.total > 0 ? Math.round((progress.height / progress.total) * 100) : 0;
+            setSyncStatus(pct >= 100 ? "synced" : "syncing");
+            setSyncMetrics({ syncProgress: pct, syncBlock: progress.total });
+          },
+          () => {
+            // Avoid sync storms: balance-updated can fire many times per sync pass.
+            // We refresh once on sync completion instead.
+          },
+          (result) => {
+            syncInFlight.current = false;
+            if (result?.ok === false) {
+              setSyncStatus("error");
+              return;
+            }
+            setSyncStatus("synced");
+            void refreshBalance();
+          },
+        );
+      } catch {
+        syncInFlight.current = false;
+        setSyncStatus("error");
+      }
+    };
+
+    void startSyncCycle();
+    void refreshMarketPrice();
+    const timer = setInterval(() => {
+      if (stopped) return;
+      void startSyncCycle();
+    }, 30_000);
+    const priceTimer = setInterval(() => {
+      if (stopped) return;
+      void refreshMarketPrice();
+    }, 60_000);
+
+    return () => {
+      stopped = true;
+      syncInFlight.current = false;
+      clearInterval(timer);
+      clearInterval(priceTimer);
+      dispose();
+    };
+  }, [setBalances, setMarketData, setSyncMetrics, setSyncStatus]);
+
   return (
     <aside className="sidebar">
       <div className="sidebar-logo">
         <div className="sidebar-logo-icon" aria-hidden="true">
-          <Icon name="pig" size={20} />
+          <Icon name="owl" size={20} />
         </div>
         <div className="sidebar-logo-text">
           <span className="sidebar-logo-name">ZecVault</span>

@@ -18,6 +18,8 @@ export function NewVaultDrawer({ onClose }: { onClose: () => void }) {
   const createVault = useVaultStore((s) => s.createVault);
   const userName = useSettings((s) => s.userName);
   const price = useWalletStore((s) => s.zecUsdPrice);
+  const activeWalletFingerprint = useWalletStore((s) => s.activeWalletFingerprint);
+  const fallbackWalletFingerprint = useWalletStore((s) => s.walletFingerprint);
 
   const cat = category ? categoryOf(category) : null;
   const goalName = category === "custom" ? (customName || "Custom goal") : (cat?.name ?? "");
@@ -34,7 +36,13 @@ export function NewVaultDrawer({ onClose }: { onClose: () => void }) {
   function handleNext() {
     if (!canNext) return;
     if (step === STEPS.length - 1) {
+      const vaultWalletFingerprint = activeWalletFingerprint || fallbackWalletFingerprint;
+      if (!vaultWalletFingerprint) {
+        toast({ type: "danger", title: "No active wallet", description: "Select an active wallet before creating a vault." });
+        return;
+      }
       const v = createVault({
+        walletFingerprint: vaultWalletFingerprint,
         category: category!,
         goalName,
         targetZat: Number(zecToZat(finalAmount)),

@@ -1,10 +1,13 @@
 import { useSettings, useVaultStore, useWalletStore } from "@/stores";
 import { toast } from "@/stores/toast";
+import { useWallet } from "@/hooks/useWallet";
+import { exportAllWalletBackupsNative, lockAppNative, saveTextFileWithDialogNative } from "@/lib/wallet-native";
 
 export function Settings() {
   const s = useSettings();
   const vaults = useVaultStore((v) => v.vaults);
   const wallet = useWalletStore();
+  const walletApi = useWallet();
 
   return (
     <div className="fade-in" style={{ maxWidth: 800 }}>
@@ -17,7 +20,20 @@ export function Settings() {
           <Row label="PIN code" desc="6-digit PIN as backup">
             <Toggle on={s.pinEnabled} onChange={(v) => s.set("pinEnabled", v)} />
           </Row>
-          <button className="btn btn-secondary btn-block" style={{ marginTop: 12 }}>View seed phrase</button>
+          <button
+            className="btn btn-secondary btn-block"
+            style={{ marginTop: 12 }}
+            onClick={async () => {
+              const ok = await lockAppNative();
+              if (!ok) {
+                toast({ type: "danger", title: "Lock failed", description: "Could not lock app." });
+                return;
+              }
+              location.reload();
+            }}
+          >
+            Lock app now
+          </button>
         </Card>
 
         <Card title="Network">
@@ -33,15 +49,101 @@ export function Settings() {
               ))}
             </div>
           </Row>
-          <button className="btn btn-secondary btn-block" style={{ marginTop: 12 }} onClick={() => toast({ type: "success", title: "Connected", description: "Latency: 84ms" })}>Test connection</button>
+          <button
+            className="btn btn-secondary btn-block"
+            style={{ marginTop: 12 }}
+            onClick={async () => {
+              try {
+                const ok = await walletApi.setLightwalletdServer(s.lightwalletdEndpoint);
+                toast({ type: ok ? "success" : "error", title: ok ? "Connected" : "Connection failed", description: ok ? "Server configured for sync." : "Could not configure lightwalletd endpoint." });
+              } catch (error) {
+                const detail = error instanceof Error ? error.message : "Could not configure endpoint.";
+                toast({ type: "error", title: "Connection failed", description: detail });
+              }
+            }}
+          >
+            Test connection
+          </button>
         </Card>
 
         <Card title="Backup">
           <p className="t-body text-gray-600">Your 24-word seed phrase is the only way to recover your wallet. Keep it offline.</p>
-          <button className="btn btn-secondary btn-block" style={{ marginTop: 16 }}>View seed phrase</button>
+          <button
+            className="btn btn-secondary btn-block"
+            style={{ marginTop: 16 }}
+            onClick={async () => {
+              try {
+                const backups = await exportAllWalletBackupsNative();
+                if (backups.length === 0) {
+                  toast({ type: "danger", title: "No wallets found", description: "No wallets available to back up." });
+                  return;
+                }
+                const content = [
+                  "ZecVault All Wallets Backup",
+                  `Exported At: ${new Date().toISOString()}`,
+                  `Wallet Count: ${backups.length}`,
+                  "",
+                  ...backups.flatMap((b, idx) => ([
+                    `--- Wallet ${idx + 1} ---`,
+                    `Wallet Name: ${b.walletName || b.walletFingerprint}`,
+                    `Wallet Fingerprint: ${b.walletFingerprint}`,
+                    `Network: ${b.network}`,
+                    `Seed Phrase: ${b.mnemonic}`,
+                    "",
+                  ])),
+                  "Keep this file offline and encrypted. Anyone with these seeds can spend your funds.",
+                ].join("\n");
+                const savedPath = await saveTextFileWithDialogNative(
+                  `zecvault-all-wallets-backup-${Date.now()}.txt`,
+                  content,
+                );
+                toast({
+                  type: "success",
+                  title: "All wallets backup downloaded",
+                  description: `Saved to: ${savedPath}`,
+                });
+              } catch (error) {
+                const detail = error instanceof Error ? error.message : "Could not export all wallets backup.";
+                if (detail === "Save canceled.") {
+                  toast({ type: "warning", title: "Backup save canceled" });
+                  return;
+                }
+                toast({ type: "danger", title: "Backup failed", description: detail });
+              }
+            }}
+          >
+            Download all wallets backup
+          </button>
         </Card>
 
         <Card title="Display">
+          <Row label="Theme" desc={`Current: ${s.theme}`}>
+            <button
+              className="btn btn-ghost"
+              style={{ height: 30, padding: "0 10px" }}
+              onClick={() => {
+                const next =
+                  s.theme === "light" ? "dark" :
+                  s.theme === "dark" ? "forest" :
+                  "light";
+                s.set("theme", next);
+              }}
+            >
+              Toggle
+            </button>
+          </Row>
+          <div className="hstack gap-8" style={{ marginTop: 10, marginBottom: 12, flexWrap: "wrap" }}>
+            {(["light", "dark", "forest"] as const).map((theme) => (
+              <button
+                key={theme}
+                className={`btn ${s.theme === theme ? "btn-primary" : "btn-secondary"}`}
+                style={{ height: 32, padding: "0 12px" }}
+                onClick={() => s.set("theme", theme)}
+              >
+                {theme[0].toUpperCase() + theme.slice(1)}
+              </button>
+            ))}
+          </div>
           <label className="label">Currency</label>
           <select className="input" value={s.currency} onChange={(e) => s.set("currency", e.target.value as never)}>
             {["USD", "SGD", "EUR", "GBP", "JPY"].map((c) => <option key={c}>{c}</option>)}

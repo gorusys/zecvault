@@ -1,7 +1,15 @@
 import { create } from "zustand";
 import { persist, createJSONStorage } from "zustand/middleware";
 import type { GoalCategory } from "@/lib/categories";
-import { mockUnifiedAddress, mockTxId } from "@/lib/zec";
+import type { NativeWalletSnapshot } from "@/lib/wallet-native";
+import {
+  deriveWalletAddresses,
+  isValidWalletMnemonic,
+  mockTxId,
+  mockUnifiedAddress,
+  normalizeMnemonic,
+  walletFingerprint,
+} from "@/lib/zec";
 
 // ---------- Types ----------
 export type SyncStatus = "synced" | "syncing" | "error";
@@ -10,6 +18,7 @@ export interface TxRecord {
   id: string;
   type: "received" | "sent" | "vault-deposit" | "vault-withdraw";
   amountZat: number; // signed (received +, sent -)
+  walletFingerprint?: string;
   toAddress?: string;
   fromAddress?: string;
   memo?: string;
@@ -25,6 +34,7 @@ export type VaultStatus = "active" | "complete" | "breaking" | "archived";
 
 export interface Vault {
   id: string;
+  walletFingerprint: string;
   category: GoalCategory;
   goalName: string;
   targetZat: number;
@@ -45,6 +55,11 @@ export interface Vault {
 // ---------- Wallet store ----------
 interface WalletState {
   isInitialized: boolean;
+  wallets: NativeWalletSnapshot[];
+  activeWalletFingerprint: string;
+  walletFingerprint: string;
+  createdAtTs: number | null;
+  birthdayHeight: number | null;
   syncStatus: SyncStatus;
   syncProgress: number; // 0..100
   syncBlock: number;
@@ -57,57 +72,150 @@ interface WalletState {
   txHistory: TxRecord[];
   zecUsdPrice: number;
   priceChange24h: number;
-  initialize: () => void;
   reset: () => void;
+  applyWalletSnapshot: (snapshot: NativeWalletSnapshot) => void;
+  setWallets: (wallets: NativeWalletSnapshot[], activeWalletFingerprint?: string) => void;
+  setActiveWallet: (walletFingerprint: string) => void;
+  createWalletFromMnemonic: (mnemonic: string, network: "mainnet" | "testnet") => void;
+  restoreWalletFromMnemonic: (mnemonic: string, network: "mainnet" | "testnet") => { ok: boolean; error?: string };
   addTx: (tx: TxRecord) => void;
   setSyncStatus: (s: SyncStatus) => void;
-}
-
-function seedTxHistory(unified: string): TxRecord[] {
-  const now = Date.now();
-  return [
-    { id: mockTxId("tx1"), type: "received", amountZat: 250_000_000, toAddress: unified, blockHeight: 2_341_120, feeZat: 0, timestamp: now - 5 * 60 * 1000, memo: "Salary stream" },
-    { id: mockTxId("tx2"), type: "vault-deposit", amountZat: -15_000_000, vaultId: "v1", blockHeight: 2_341_080, feeZat: 1000, timestamp: now - 6 * 3600 * 1000, memo: "ZV1|t:trip|n:Tokyo|a:80|dl:" },
-    { id: mockTxId("tx3"), type: "sent", amountZat: -32_500_000, toAddress: mockUnifiedAddress("friend", 3), blockHeight: 2_340_980, feeZat: 1000, timestamp: now - 26 * 3600 * 1000, memo: "Dinner split" },
-    { id: mockTxId("tx4"), type: "vault-deposit", amountZat: -8_000_000, vaultId: "v2", blockHeight: 2_340_700, feeZat: 1000, timestamp: now - 2 * 86400_000, memo: "Round-up" },
-    { id: mockTxId("tx5"), type: "received", amountZat: 500_000_000, toAddress: unified, blockHeight: 2_340_500, feeZat: 0, timestamp: now - 4 * 86400_000 },
-    { id: mockTxId("tx6"), type: "vault-deposit", amountZat: -25_000_000, vaultId: "v1", blockHeight: 2_340_300, feeZat: 1000, timestamp: now - 6 * 86400_000 },
-    { id: mockTxId("tx7"), type: "received", amountZat: 1_200_000_000, toAddress: unified, blockHeight: 2_339_900, feeZat: 0, timestamp: now - 12 * 86400_000, memo: "Refund from Joey" },
-  ];
+  setSyncMetrics: (input: { syncProgress: number; syncBlock: number }) => void;
+  setBalances: (input: { totalZat: number; spendableZat: number; pendingZat: number }) => void;
+  setMarketData: (input: { zecUsdPrice: number; priceChange24h: number }) => void;
 }
 
 export const useWalletStore = create<WalletState>()(
   persist(
     (set, get) => ({
       isInitialized: false,
+      wallets: [],
+      activeWalletFingerprint: "",
+      walletFingerprint: "",
+      createdAtTs: null,
+      birthdayHeight: null,
       syncStatus: "synced",
       syncProgress: 100,
       syncBlock: 2_341_120,
-      totalZat: 412_5000_000,
-      spendableZat: 304_2500_000,
+      totalZat: 0,
+      spendableZat: 0,
       pendingZat: 0,
       unifiedAddress: "",
       saplingAddress: "",
       transparentAddress: "",
       txHistory: [],
-      zecUsdPrice: 32.41,
+      zecUsdPrice: 364.1,
       priceChange24h: 2.4,
-      initialize: () => {
-        if (get().isInitialized) return;
-        const unified = mockUnifiedAddress("zecvault-main", 0);
-        const sapling = "zs1" + mockUnifiedAddress("sap", 0).slice(2, 78);
-        const transparent = "t1" + mockUnifiedAddress("tr", 0).slice(2, 34);
+      reset: () => set({
+        isInitialized: false,
+        wallets: [],
+        activeWalletFingerprint: "",
+        walletFingerprint: "",
+        createdAtTs: null,
+        birthdayHeight: null,
+        totalZat: 0,
+        spendableZat: 0,
+        pendingZat: 0,
+        unifiedAddress: "",
+        saplingAddress: "",
+        transparentAddress: "",
+        txHistory: [],
+      }),
+      applyWalletSnapshot: (snapshot) => set((state) => {
+        const wallets = state.wallets.filter((w) => w.walletFingerprint !== snapshot.walletFingerprint);
+        wallets.unshift(snapshot);
+        return {
+          isInitialized: true,
+          wallets,
+          activeWalletFingerprint: snapshot.walletFingerprint,
+          walletFingerprint: snapshot.walletFingerprint,
+          createdAtTs: snapshot.createdAtTs * 1000,
+          birthdayHeight: snapshot.birthdayHeight,
+          unifiedAddress: snapshot.unifiedAddress,
+          saplingAddress: snapshot.saplingAddress,
+          transparentAddress: snapshot.transparentAddress,
+          txHistory: [],
+          totalZat: 0,
+          spendableZat: 0,
+          pendingZat: 0,
+        };
+      }),
+      setWallets: (wallets, activeWalletFingerprint) => set(() => {
+        const active = wallets.find((w) => w.walletFingerprint === activeWalletFingerprint) ?? wallets[0];
+        return {
+          wallets,
+          isInitialized: wallets.length > 0,
+          activeWalletFingerprint: active?.walletFingerprint ?? "",
+          walletFingerprint: active?.walletFingerprint ?? "",
+          createdAtTs: active ? active.createdAtTs * 1000 : null,
+          birthdayHeight: active?.birthdayHeight ?? null,
+          unifiedAddress: active?.unifiedAddress ?? "",
+          saplingAddress: active?.saplingAddress ?? "",
+          transparentAddress: active?.transparentAddress ?? "",
+          txHistory: [],
+          totalZat: 0,
+          spendableZat: 0,
+          pendingZat: 0,
+        };
+      }),
+      setActiveWallet: (walletFingerprint) => set((state) => {
+        const active = state.wallets.find((w) => w.walletFingerprint === walletFingerprint);
+        if (!active) return {};
+        return {
+          activeWalletFingerprint: walletFingerprint,
+          walletFingerprint,
+          createdAtTs: active.createdAtTs * 1000,
+          birthdayHeight: active.birthdayHeight,
+          unifiedAddress: active.unifiedAddress,
+          saplingAddress: active.saplingAddress,
+          transparentAddress: active.transparentAddress,
+          txHistory: [],
+          totalZat: 0,
+          spendableZat: 0,
+          pendingZat: 0,
+        };
+      }),
+      createWalletFromMnemonic: (mnemonic, network) => {
+        const normalized = normalizeMnemonic(mnemonic);
+        const addresses = deriveWalletAddresses(normalized, network);
+        const now = Date.now();
         set({
           isInitialized: true,
-          unifiedAddress: unified,
-          saplingAddress: sapling,
-          transparentAddress: transparent,
-          txHistory: seedTxHistory(unified),
+          walletFingerprint: walletFingerprint(normalized),
+          createdAtTs: now,
+          birthdayHeight: network === "testnet" ? 280_000 : 419_200,
+          unifiedAddress: addresses.unifiedAddress,
+          saplingAddress: addresses.saplingAddress,
+          transparentAddress: addresses.transparentAddress,
+          txHistory: [],
+          totalZat: 0,
+          spendableZat: 0,
+          pendingZat: 0,
         });
       },
-      reset: () => set({ isInitialized: false, txHistory: [] }),
+      restoreWalletFromMnemonic: (mnemonic, network) => {
+        const normalized = normalizeMnemonic(mnemonic);
+        if (!isValidWalletMnemonic(normalized)) {
+          return { ok: false, error: "Invalid 24-word BIP39 mnemonic." };
+        }
+        get().createWalletFromMnemonic(normalized, network);
+        return { ok: true };
+      },
       addTx: (tx) => set({ txHistory: [tx, ...get().txHistory] }),
       setSyncStatus: (s) => set({ syncStatus: s }),
+      setSyncMetrics: ({ syncProgress, syncBlock }) => set({
+        syncProgress,
+        syncBlock,
+      }),
+      setBalances: ({ totalZat, spendableZat, pendingZat }) => set({
+        totalZat,
+        spendableZat,
+        pendingZat,
+      }),
+      setMarketData: ({ zecUsdPrice, priceChange24h }) => set({
+        zecUsdPrice,
+        priceChange24h,
+      }),
     }),
     { name: "zecvault-wallet", storage: createJSONStorage(() => localStorage) },
   ),
@@ -117,9 +225,10 @@ export const useWalletStore = create<WalletState>()(
 interface VaultState {
   vaults: Vault[];
   archive: Vault[];
-  ensureSeeded: () => void;
-  createVault: (input: { category: GoalCategory; goalName: string; targetZat: number; deadlineTs: number; }) => Vault;
+  createVault: (input: { walletFingerprint: string; category: GoalCategory; goalName: string; targetZat: number; deadlineTs: number; }) => Vault;
   deposit: (id: string, amountZat: number) => void;
+  getVaultsForWallet: (walletFingerprint: string) => Vault[];
+  getArchiveForWallet: (walletFingerprint: string) => Vault[];
   completeVault: (id: string) => void;
   requestBreak: (id: string) => void;
   cancelBreak: (id: string) => void;
@@ -127,61 +236,19 @@ interface VaultState {
   removeVault: (id: string) => void;
 }
 
-function seededVaults(): Vault[] {
-  const now = Date.now();
-  return [
-    {
-      id: "v1", category: "trip", goalName: "Tokyo trip",
-      targetZat: 80 * 1e8, deadlineTs: now + 73 * 86400_000, createdTs: now - 42 * 86400_000,
-      shieldedAddress: mockUnifiedAddress("vault-trip", 1), derivationIndex: 1,
-      currentBalanceZat: 51.2 * 1e8,
-      contributions: [], streakDays: 18, lastContributionTs: now - 6 * 3600_000,
-      status: "active", commitmentTxId: mockTxId("c1"), commitmentBlock: 2_298_400, breakRequest: null,
-    },
-    {
-      id: "v2", category: "ring", goalName: "Engagement ring",
-      targetZat: 120 * 1e8, deadlineTs: now + 22 * 86400_000, createdTs: now - 90 * 86400_000,
-      shieldedAddress: mockUnifiedAddress("vault-ring", 2), derivationIndex: 2,
-      currentBalanceZat: 88.4 * 1e8,
-      contributions: [], streakDays: 41, lastContributionTs: now - 2 * 86400_000,
-      status: "active", commitmentTxId: mockTxId("c2"), commitmentBlock: 2_265_120, breakRequest: null,
-    },
-    {
-      id: "v3", category: "emer", goalName: "Emergency fund",
-      targetZat: 200 * 1e8, deadlineTs: now + 180 * 86400_000, createdTs: now - 12 * 86400_000,
-      shieldedAddress: mockUnifiedAddress("vault-emer", 3), derivationIndex: 3,
-      currentBalanceZat: 14.7 * 1e8,
-      contributions: [], streakDays: 5, lastContributionTs: now - 86400_000,
-      status: "active", commitmentTxId: mockTxId("c3"), commitmentBlock: 2_336_200, breakRequest: null,
-    },
-    {
-      id: "v4", category: "house", goalName: "House down payment",
-      targetZat: 500 * 1e8, deadlineTs: now + 9 * 86400_000, createdTs: now - 240 * 86400_000,
-      shieldedAddress: mockUnifiedAddress("vault-house", 4), derivationIndex: 4,
-      currentBalanceZat: 320 * 1e8,
-      contributions: [], streakDays: 62, lastContributionTs: now - 4 * 3600_000,
-      status: "active", commitmentTxId: mockTxId("c4"), commitmentBlock: 2_120_800, breakRequest: null,
-    },
-  ];
-}
-
 export const useVaultStore = create<VaultState>()(
   persist(
     (set, get) => ({
       vaults: [],
       archive: [],
-      ensureSeeded: () => {
-        if (get().vaults.length === 0 && get().archive.length === 0) {
-          set({ vaults: seededVaults() });
-        }
-      },
-      createVault: ({ category, goalName, targetZat, deadlineTs }) => {
+      createVault: ({ walletFingerprint, category, goalName, targetZat, deadlineTs }) => {
         const idx = get().vaults.length + get().archive.length + 1;
         const v: Vault = {
           id: "v" + idx + "_" + Date.now().toString(36),
+          walletFingerprint,
           category, goalName, targetZat, deadlineTs,
           createdTs: Date.now(),
-          shieldedAddress: mockUnifiedAddress("vault-" + category, idx),
+          shieldedAddress: mockUnifiedAddress(`${walletFingerprint}|vault-${category}`, idx),
           derivationIndex: idx,
           currentBalanceZat: 0,
           contributions: [],
@@ -200,6 +267,8 @@ export const useVaultStore = create<VaultState>()(
           ? { ...v, currentBalanceZat: v.currentBalanceZat + amountZat, lastContributionTs: Date.now(), streakDays: v.streakDays + 1 }
           : v),
       }),
+      getVaultsForWallet: (walletFingerprint) => get().vaults.filter((v) => (v.walletFingerprint || walletFingerprint) === walletFingerprint),
+      getArchiveForWallet: (walletFingerprint) => get().archive.filter((v) => (v.walletFingerprint || walletFingerprint) === walletFingerprint),
       completeVault: (id) => set({
         vaults: get().vaults.map((v) => v.id === id ? { ...v, status: "complete" as const } : v),
       }),
@@ -227,6 +296,7 @@ export const useVaultStore = create<VaultState>()(
 
 // ---------- Settings store ----------
 interface SettingsState {
+  theme: "light" | "dark" | "forest";
   currency: "USD" | "SGD" | "EUR" | "GBP" | "JPY";
   zecDecimals: 2 | 4 | 8;
   lightwalletdEndpoint: string;
@@ -246,6 +316,7 @@ interface SettingsState {
 export const useSettings = create<SettingsState>()(
   persist(
     (set) => ({
+      theme: "light",
       currency: "USD",
       zecDecimals: 4,
       lightwalletdEndpoint: "https://zec.rocks:443",
@@ -253,8 +324,8 @@ export const useSettings = create<SettingsState>()(
       biometricsEnabled: true,
       pinEnabled: false,
       notificationsEnabled: true,
-      roundupEnabled: true,
-      roundupVaultId: "v1",
+      roundupEnabled: false,
+      roundupVaultId: null,
       roundupThreshold: 0.1,
       onboardingComplete: false,
       userName: "Friend",

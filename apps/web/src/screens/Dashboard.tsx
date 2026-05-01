@@ -10,30 +10,78 @@ import { Link } from "@tanstack/react-router";
 
 export function Dashboard() {
   const userName = useSettings((s) => s.userName);
-  const { totalZat, spendableZat, zecUsdPrice, priceChange24h, txHistory, syncStatus } = useWalletStore();
+  const { totalZat, spendableZat, zecUsdPrice, priceChange24h, txHistory, syncStatus, syncProgress, unifiedAddress, saplingAddress, transparentAddress, wallets, activeWalletFingerprint, walletFingerprint } = useWalletStore();
   const vaults = useVaultStore((s) => s.vaults);
+  const archive = useVaultStore((s) => s.archive);
   const [showNewVault, setShowNewVault] = useState(false);
 
-  const lockedZat = useMemo(() => vaults.reduce((acc, v) => acc + v.currentBalanceZat, 0), [vaults]);
-  const recentTx = txHistory.slice(0, 6);
   const greeting = useMemo(() => {
     const h = new Date().getHours();
     return h < 12 ? "Good morning" : h < 18 ? "Good afternoon" : "Good evening";
   }, []);
+  const activeWallet = useMemo(
+    () => wallets.find((w) => w.walletFingerprint === (activeWalletFingerprint || walletFingerprint)),
+    [wallets, activeWalletFingerprint, walletFingerprint],
+  );
+  const activeWalletName = activeWallet?.walletName?.trim() || "Active wallet";
+  const activeWalletKey = activeWalletFingerprint || walletFingerprint;
+  const activeWalletVaults = useMemo(
+    () => vaults.filter((v) => (v.walletFingerprint || activeWalletKey) === activeWalletKey),
+    [vaults, activeWalletKey],
+  );
+  const activeWalletAllVaults = useMemo(
+    () => [...vaults, ...archive].filter((v) => (v.walletFingerprint || activeWalletKey) === activeWalletKey),
+    [vaults, archive, activeWalletKey],
+  );
+  const activeWalletTx = useMemo(
+    () => txHistory.filter((tx) => !tx.walletFingerprint || tx.walletFingerprint === activeWalletKey),
+    [txHistory, activeWalletKey],
+  );
+  const lockedZat = useMemo(
+    () => activeWalletVaults.reduce((acc, v) => acc + v.currentBalanceZat, 0),
+    [activeWalletVaults],
+  );
+  const recentTx = activeWalletTx.slice(0, 6);
 
   return (
     <div className="fade-in">
       {/* Header */}
       <div className="hstack between" style={{ marginBottom: 24 }}>
         <div>
-          <div className="t-caption text-gray-400">{greeting},</div>
-          <h1 className="t-h1">{userName}</h1>
+          <div className="t-caption text-gray-400">{greeting}, {userName}</div>
+          <h1 className="t-h1">{activeWalletName}</h1>
+          <div className="hstack gap-8" style={{ marginTop: 8, flexWrap: "wrap" }}>
+            {(unifiedAddress || activeWallet?.unifiedAddress) && (
+              <span className="pill">{truncateAddress(unifiedAddress || activeWallet?.unifiedAddress || "")}</span>
+            )}
+            {(saplingAddress || activeWallet?.saplingAddress) && (
+              <span className="pill">{truncateAddress(saplingAddress || activeWallet?.saplingAddress || "")}</span>
+            )}
+            {(transparentAddress || activeWallet?.transparentAddress) && (
+              <span className="pill">{truncateAddress(transparentAddress || activeWallet?.transparentAddress || "")}</span>
+            )}
+          </div>
         </div>
         <span className={`pill ${syncStatus === "synced" ? "pill-success" : syncStatus === "syncing" ? "pill-warning" : "pill-danger"}`}>
           <span className={`sync-dot ${syncStatus !== "synced" ? syncStatus : ""}`} style={{ marginRight: 4 }} />
           {syncStatus === "synced" ? "Fully synced" : syncStatus === "syncing" ? "Syncing…" : "Sync error"}
         </span>
       </div>
+      {syncStatus === "syncing" && (
+        <div style={{ marginBottom: 16 }}>
+          <div style={{ height: 6, width: "100%", background: "var(--gray-100)", borderRadius: 999 }}>
+            <div
+              style={{
+                height: "100%",
+                width: `${syncProgress}%`,
+                borderRadius: 999,
+                background: "var(--coral-400)",
+                transition: "width 200ms ease",
+              }}
+            />
+          </div>
+        </div>
+      )}
 
       {/* Portfolio card */}
       <div className="card card-pad" style={{ marginBottom: 28 }}>
@@ -59,14 +107,14 @@ export function Dashboard() {
       <div className="hstack between" style={{ marginBottom: 14 }}>
         <div className="hstack gap-10">
           <h2 className="t-h3">Active vaults</h2>
-          <span className="pill pill-coral">{vaults.length}</span>
+          <span className="pill pill-coral">{activeWalletVaults.length}</span>
         </div>
         <button className="btn btn-ghost" onClick={() => setShowNewVault(true)}>
           <Icon name="plus" size={16} /> New vault
         </button>
       </div>
 
-      {vaults.length === 0 ? (
+      {activeWalletVaults.length === 0 ? (
         <div className="card card-pad" style={{ textAlign: "center", padding: 48 }}>
           <div style={{ fontSize: 48 }}>🎯</div>
           <h3 className="t-h3" style={{ marginTop: 12 }}>No active vaults yet</h3>
@@ -77,7 +125,7 @@ export function Dashboard() {
         </div>
       ) : (
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))", gap: 14 }}>
-          {vaults.map((v, i) => <VaultCard key={v.id} vault={v} animateDelay={i * 80} />)}
+          {activeWalletVaults.map((v, i) => <VaultCard key={v.id} vault={v} animateDelay={i * 80} />)}
         </div>
       )}
 
@@ -92,7 +140,7 @@ export function Dashboard() {
         ) : recentTx.map((tx) => {
           const isReceived = tx.type === "received";
           const isVault = tx.type.startsWith("vault");
-          const vault = isVault ? vaults.find((v) => v.id === tx.vaultId) : null;
+          const vault = isVault ? activeWalletAllVaults.find((v) => v.id === tx.vaultId) : null;
           const cat = vault ? categoryOf(vault.category) : null;
           const amountColor = isReceived ? "var(--success-strong)" : isVault ? "#4FA3E3" : "var(--coral-400)";
           return (
