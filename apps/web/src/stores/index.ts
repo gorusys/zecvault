@@ -67,6 +67,11 @@ interface WalletState {
   spendableZat: number;
   pendingZat: number;
   unifiedAddress: string;
+  orchardUnifiedAddress: string;
+  saplingUnifiedAddress: string;
+  unifiedOrchardTransparentAddress: string;
+  unifiedSaplingTransparentAddress: string;
+  unifiedAllAddress: string;
   saplingAddress: string;
   transparentAddress: string;
   txHistory: TxRecord[];
@@ -101,6 +106,11 @@ export const useWalletStore = create<WalletState>()(
       spendableZat: 0,
       pendingZat: 0,
       unifiedAddress: "",
+      orchardUnifiedAddress: "",
+      saplingUnifiedAddress: "",
+      unifiedOrchardTransparentAddress: "",
+      unifiedSaplingTransparentAddress: "",
+      unifiedAllAddress: "",
       saplingAddress: "",
       transparentAddress: "",
       txHistory: [],
@@ -117,6 +127,11 @@ export const useWalletStore = create<WalletState>()(
         spendableZat: 0,
         pendingZat: 0,
         unifiedAddress: "",
+        orchardUnifiedAddress: "",
+        saplingUnifiedAddress: "",
+        unifiedOrchardTransparentAddress: "",
+        unifiedSaplingTransparentAddress: "",
+        unifiedAllAddress: "",
         saplingAddress: "",
         transparentAddress: "",
         txHistory: [],
@@ -132,6 +147,11 @@ export const useWalletStore = create<WalletState>()(
           createdAtTs: snapshot.createdAtTs * 1000,
           birthdayHeight: snapshot.birthdayHeight,
           unifiedAddress: snapshot.unifiedAddress,
+          orchardUnifiedAddress: snapshot.orchardUnifiedAddress ?? "",
+          saplingUnifiedAddress: snapshot.saplingUnifiedAddress ?? "",
+          unifiedOrchardTransparentAddress: snapshot.unifiedOrchardTransparentAddress ?? "",
+          unifiedSaplingTransparentAddress: snapshot.unifiedSaplingTransparentAddress ?? "",
+          unifiedAllAddress: snapshot.unifiedAllAddress ?? "",
           saplingAddress: snapshot.saplingAddress,
           transparentAddress: snapshot.transparentAddress,
           txHistory: [],
@@ -150,6 +170,11 @@ export const useWalletStore = create<WalletState>()(
           createdAtTs: active ? active.createdAtTs * 1000 : null,
           birthdayHeight: active?.birthdayHeight ?? null,
           unifiedAddress: active?.unifiedAddress ?? "",
+          orchardUnifiedAddress: active?.orchardUnifiedAddress ?? "",
+          saplingUnifiedAddress: active?.saplingUnifiedAddress ?? "",
+          unifiedOrchardTransparentAddress: active?.unifiedOrchardTransparentAddress ?? "",
+          unifiedSaplingTransparentAddress: active?.unifiedSaplingTransparentAddress ?? "",
+          unifiedAllAddress: active?.unifiedAllAddress ?? "",
           saplingAddress: active?.saplingAddress ?? "",
           transparentAddress: active?.transparentAddress ?? "",
           txHistory: [],
@@ -167,6 +192,11 @@ export const useWalletStore = create<WalletState>()(
           createdAtTs: active.createdAtTs * 1000,
           birthdayHeight: active.birthdayHeight,
           unifiedAddress: active.unifiedAddress,
+          orchardUnifiedAddress: active.orchardUnifiedAddress ?? "",
+          saplingUnifiedAddress: active.saplingUnifiedAddress ?? "",
+          unifiedOrchardTransparentAddress: active.unifiedOrchardTransparentAddress ?? "",
+          unifiedSaplingTransparentAddress: active.unifiedSaplingTransparentAddress ?? "",
+          unifiedAllAddress: active.unifiedAllAddress ?? "",
           saplingAddress: active.saplingAddress,
           transparentAddress: active.transparentAddress,
           txHistory: [],
@@ -185,6 +215,11 @@ export const useWalletStore = create<WalletState>()(
           createdAtTs: now,
           birthdayHeight: network === "testnet" ? 280_000 : 419_200,
           unifiedAddress: addresses.unifiedAddress,
+          orchardUnifiedAddress: "",
+          saplingUnifiedAddress: "",
+          unifiedOrchardTransparentAddress: "",
+          unifiedSaplingTransparentAddress: "",
+          unifiedAllAddress: "",
           saplingAddress: addresses.saplingAddress,
           transparentAddress: addresses.transparentAddress,
           txHistory: [],
@@ -309,6 +344,8 @@ interface SettingsState {
   roundupThreshold: 0.01 | 0.1 | 1;
   onboardingComplete: boolean;
   userName: string;
+  /** Show Orchard/Sapling/UA technical receive options and technical send labels. */
+  expertAddressMode: boolean;
   set: <K extends keyof SettingsState>(k: K, v: SettingsState[K]) => void;
   completeOnboarding: (name: string) => void;
 }
@@ -329,9 +366,21 @@ export const useSettings = create<SettingsState>()(
       roundupThreshold: 0.1,
       onboardingComplete: false,
       userName: "Friend",
+      expertAddressMode: false,
       set: (k, v) => set({ [k]: v } as Pick<SettingsState, typeof k>),
       completeOnboarding: (name) => set({ onboardingComplete: true, userName: name }),
     }),
-    { name: "zecvault-settings", storage: createJSONStorage(() => localStorage) },
+    {
+      name: "zecvault-settings",
+      storage: createJSONStorage(() => localStorage),
+      merge: (persisted, current) => {
+        const p = persisted as Partial<SettingsState>;
+        return {
+          ...current,
+          ...p,
+          expertAddressMode: p.expertAddressMode ?? current.expertAddressMode,
+        };
+      },
+    },
   ),
 );

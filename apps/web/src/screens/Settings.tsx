@@ -117,21 +117,13 @@ export function Settings() {
         </Card>
 
         <Card title="Display">
-          <Row label="Theme" desc={`Current: ${s.theme}`}>
-            <button
-              className="btn btn-ghost"
-              style={{ height: 30, padding: "0 10px" }}
-              onClick={() => {
-                const next =
-                  s.theme === "light" ? "dark" :
-                  s.theme === "dark" ? "forest" :
-                  "light";
-                s.set("theme", next);
-              }}
-            >
-              Toggle
-            </button>
+          <Row
+            label="Expert address options"
+            desc="Show technical address details for advanced users."
+          >
+            <Toggle on={s.expertAddressMode} onChange={(v) => s.set("expertAddressMode", v)} />
           </Row>
+          <Row label="Theme" desc="Choose app appearance"><span /></Row>
           <div className="hstack gap-8" style={{ marginTop: 10, marginBottom: 12, flexWrap: "wrap" }}>
             {(["light", "dark", "forest"] as const).map((theme) => (
               <button
@@ -147,10 +139,6 @@ export function Settings() {
           <label className="label">Currency</label>
           <select className="input" value={s.currency} onChange={(e) => s.set("currency", e.target.value as never)}>
             {["USD", "SGD", "EUR", "GBP", "JPY"].map((c) => <option key={c}>{c}</option>)}
-          </select>
-          <label className="label" style={{ marginTop: 12 }}>ZEC decimals</label>
-          <select className="input" value={s.zecDecimals} onChange={(e) => s.set("zecDecimals", Number(e.target.value) as never)}>
-            {[2, 4, 8].map((d) => <option key={d} value={d}>{d}</option>)}
           </select>
         </Card>
 
