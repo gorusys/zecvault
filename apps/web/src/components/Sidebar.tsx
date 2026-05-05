@@ -1,7 +1,7 @@
 import { Link, useRouterState } from "@tanstack/react-router";
 import { useEffect, useRef } from "react";
 import { Icon, type IconName } from "./Icon";
-import { useVaultStore, useWalletStore } from "@/stores";
+import { useSettings, useVaultStore, useWalletStore } from "@/stores";
 import { useWallet } from "@/hooks/useWallet";
 
 interface NavDef { to: string; icon: IconName; label: string; section: "Main" | "Account"; badge?: number; }
@@ -11,6 +11,8 @@ export function Sidebar() {
   const vaults = useVaultStore((s) => s.vaults);
   const activeWalletFingerprint = useWalletStore((s) => s.activeWalletFingerprint);
   const fallbackWalletFingerprint = useWalletStore((s) => s.walletFingerprint);
+  const expertAddressMode = useSettings((s) => s.expertAddressMode);
+  const setSetting = useSettings((s) => s.set);
   const syncStatus = useWalletStore((s) => s.syncStatus);
   const syncBlock = useWalletStore((s) => s.syncBlock);
   const setSyncStatus = useWalletStore((s) => s.setSyncStatus);
@@ -158,6 +160,25 @@ export function Sidebar() {
             ))}
           </div>
         ))}
+
+        <div style={{ marginTop: 8, padding: "10px 12px" }}>
+          <div className="t-caption text-gray-400" style={{ marginBottom: 6 }}>Address view</div>
+          <button
+            className="btn btn-ghost"
+            onClick={() => setSetting("expertAddressMode", !expertAddressMode)}
+            style={{ height: 28, padding: "0 8px", display: "inline-flex", alignItems: "center", gap: 6 }}
+            aria-pressed={expertAddressMode}
+            aria-label="Toggle expert address options"
+          >
+            <span
+              className={`toggle ${expertAddressMode ? "on" : ""}`}
+              style={{ transform: "scale(0.82)", transformOrigin: "center", pointerEvents: "none" }}
+            />
+            <span className="t-caption text-gray-600">
+              {expertAddressMode ? "Expert mode" : "Simple mode"}
+            </span>
+          </button>
+        </div>
 
         <div className="sidebar-footer">
           <span className={`sync-dot ${syncStatus !== "synced" ? syncStatus : ""}`} />

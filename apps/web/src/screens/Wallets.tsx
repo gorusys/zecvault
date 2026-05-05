@@ -234,11 +234,19 @@ export function Wallets() {
               return (
                 <div key={w.walletFingerprint} className="hstack between" style={{ padding: 10, border: "1px solid var(--gray-100)", borderRadius: "var(--r-md)" }}>
                   <div>
-                    <div className="t-body-med">{w.walletName?.trim() || w.walletFingerprint}</div>
-                    <div className="t-caption text-gray-400">
-                      {w.network} • {w.walletFingerprint}
+                    <div className="hstack gap-8" style={{ alignItems: "center" }}>
+                      <div className="t-body-med">{w.walletName?.trim() || w.walletFingerprint}</div>
+                      {isActive && <span className="pill pill-success">Active</span>}
                     </div>
-                    <div className="t-caption text-gray-400">{w.unifiedAddress.slice(0, 12)}…{w.unifiedAddress.slice(-10)}</div>
+                    <div className="t-caption text-gray-400">
+                      {w.network}
+                    </div>
+                    <div className="t-caption text-gray-400" style={{ marginTop: 4 }}>
+                      Private: {w.unifiedAddress.slice(0, 12)}…{w.unifiedAddress.slice(-10)}
+                    </div>
+                    <div className="t-caption text-gray-400">
+                      Public: {w.transparentAddress.slice(0, 10)}…{w.transparentAddress.slice(-8)}
+                    </div>
                     <div className="hstack gap-8" style={{ marginTop: 8, flexWrap: "wrap" }}>
                       <span className="pill">Total: {isActive ? `${fmtZec(totalZat)} ZEC` : "Set active to load"}</span>
                       <span className="pill">Locked: {fmtZec(lockedZat)} ZEC</span>
@@ -253,7 +261,7 @@ export function Wallets() {
                       Details
                     </button>
                     <button className={`btn ${isActive ? "btn-secondary" : "btn-ghost"}`} disabled={isActive} onClick={() => void handleSetActive(w.walletFingerprint)}>
-                      {isActive ? "Active" : "Set active"}
+                      {isActive ? "Current" : "Use this wallet"}
                     </button>
                   </div>
                 </div>

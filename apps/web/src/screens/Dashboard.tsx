@@ -1,4 +1,5 @@
 import { useMemo, useState } from "react";
+import { Link } from "@tanstack/react-router";
 import { useSettings, useVaultStore, useWalletStore } from "@/stores";
 import { fmtZec, fmtFiat, formatRelativeTime, truncateAddress } from "@/lib/zec";
 import { categoryOf } from "@/lib/categories";
@@ -6,10 +7,11 @@ import { AnimatedNumber } from "@/components/AnimatedNumber";
 import { Icon } from "@/components/Icon";
 import { VaultCard } from "@/components/VaultCard";
 import { NewVaultDrawer } from "./NewVaultDrawer";
-import { Link } from "@tanstack/react-router";
+import { toast } from "@/stores/toast";
 
 export function Dashboard() {
   const userName = useSettings((s) => s.userName);
+  const expertAddressMode = useSettings((s) => s.expertAddressMode);
   const { totalZat, spendableZat, zecUsdPrice, priceChange24h, txHistory, syncStatus, syncProgress, unifiedAddress, saplingAddress, transparentAddress, wallets, activeWalletFingerprint, walletFingerprint } = useWalletStore();
   const vaults = useVaultStore((s) => s.vaults);
   const archive = useVaultStore((s) => s.archive);
@@ -42,6 +44,15 @@ export function Dashboard() {
     [activeWalletVaults],
   );
   const recentTx = activeWalletTx.slice(0, 6);
+  const displayUnified = unifiedAddress || activeWallet?.unifiedAddress || "";
+  const displaySapling = saplingAddress || activeWallet?.saplingAddress || "";
+  const displayTransparent = transparentAddress || activeWallet?.transparentAddress || "";
+
+  function copyAddress(label: string, value: string) {
+    if (!value) return;
+    navigator.clipboard?.writeText(value);
+    toast({ type: "success", title: `${label} address copied` });
+  }
 
   return (
     <div className="fade-in">
@@ -50,15 +61,41 @@ export function Dashboard() {
         <div>
           <div className="t-caption text-gray-400">{greeting}, {userName}</div>
           <h1 className="t-h1">{activeWalletName}</h1>
-          <div className="hstack gap-8" style={{ marginTop: 8, flexWrap: "wrap" }}>
-            {(unifiedAddress || activeWallet?.unifiedAddress) && (
-              <span className="pill">{truncateAddress(unifiedAddress || activeWallet?.unifiedAddress || "")}</span>
-            )}
-            {(saplingAddress || activeWallet?.saplingAddress) && (
-              <span className="pill">{truncateAddress(saplingAddress || activeWallet?.saplingAddress || "")}</span>
-            )}
-            {(transparentAddress || activeWallet?.transparentAddress) && (
-              <span className="pill">{truncateAddress(transparentAddress || activeWallet?.transparentAddress || "")}</span>
+          <div className="hstack gap-8" style={{ marginTop: 8, flexWrap: "wrap", alignItems: "center" }}>
+            {expertAddressMode ? (
+              <>
+                {displayUnified && (
+                  <button type="button" className="pill pill-info" title="Unified (click to copy)" onClick={() => copyAddress("Unified", displayUnified)}>
+                    {truncateAddress(displayUnified)}
+                  </button>
+                )}
+                {displaySapling && (
+                  <button type="button" className="pill pill-success" title="Sapling (click to copy)" onClick={() => copyAddress("Sapling", displaySapling)}>
+                    {truncateAddress(displaySapling)}
+                  </button>
+                )}
+                {displayTransparent && (
+                  <button type="button" className="pill pill-warning" title="Transparent (click to copy)" onClick={() => copyAddress("Transparent", displayTransparent)}>
+                    {truncateAddress(displayTransparent)}
+                  </button>
+                )}
+              </>
+            ) : (
+              <>
+                {displayUnified && (
+                  <button type="button" className="pill pill-success" title="Private receive (click to copy)" onClick={() => copyAddress("Private", displayUnified)}>
+                    Private receive {truncateAddress(displayUnified)}
+                  </button>
+                )}
+                {displayTransparent && (
+                  <button type="button" className="pill pill-warning" title="Public receive (click to copy)" onClick={() => copyAddress("Public", displayTransparent)}>
+                    Public receive {truncateAddress(displayTransparent)}
+                  </button>
+                )}
+                <Link to="/receive" className="t-caption text-coral" style={{ textDecoration: "underline" }}>
+                  Change receive mode
+                </Link>
+              </>
             )}
           </div>
         </div>
