@@ -11,6 +11,12 @@ export interface NativeWalletSnapshot {
   walletName?: string;
   walletFingerprint: string;
   unifiedAddress: string;
+  /** Orchard-only unified address (`UnifiedAddressRequest::ORCHARD`), same diversifier as other receive addresses. */
+  orchardUnifiedAddress?: string;
+  saplingUnifiedAddress?: string;
+  unifiedOrchardTransparentAddress?: string;
+  unifiedSaplingTransparentAddress?: string;
+  unifiedAllAddress?: string;
   saplingAddress: string;
   transparentAddress: string;
   createdAtTs: number;
@@ -103,6 +109,11 @@ function fallbackSnapshot(mnemonic: string, network: "mainnet" | "testnet"): Nat
     network,
     walletFingerprint: walletFingerprint(normalized),
     unifiedAddress: derived.unifiedAddress,
+    orchardUnifiedAddress: "",
+    saplingUnifiedAddress: "",
+    unifiedOrchardTransparentAddress: "",
+    unifiedSaplingTransparentAddress: "",
+    unifiedAllAddress: "",
     saplingAddress: derived.saplingAddress,
     transparentAddress: derived.transparentAddress,
     createdAtTs: Math.floor(Date.now() / 1000),

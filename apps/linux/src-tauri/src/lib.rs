@@ -30,13 +30,15 @@ use zcash_client_sqlite::util::SystemClock;
 use zcash_client_sqlite::wallet::init::init_wallet_db;
 use zcash_client_sqlite::WalletDb;
 use zcash_keys::address::Address as ZcashPoolAddress;
-use zcash_keys::keys::{UnifiedAddressRequest, UnifiedSpendingKey};
+use zcash_keys::keys::{
+    ReceiverRequirement, UnifiedAddressRequest, UnifiedFullViewingKey, UnifiedSpendingKey,
+};
 use zcash_proofs::prover::LocalTxProver;
 use zcash_protocol::ShieldedProtocol;
 use zcash_protocol::consensus::{BlockHeight, MAIN_NETWORK, TEST_NETWORK};
 use zcash_protocol::memo::Memo;
 use zcash_protocol::value::Zatoshis;
-use zip32::AccountId;
+use zip32::{AccountId, DiversifierIndex};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -54,6 +56,16 @@ struct WalletRecord {
     wallet_name: String,
     wallet_fingerprint: String,
     unified_address: String,
+    #[serde(default)]
+    orchard_unified_address: String,
+    #[serde(default)]
+    sapling_unified_address: String,
+    #[serde(default)]
+    unified_orchard_transparent_address: String,
+    #[serde(default)]
+    unified_sapling_transparent_address: String,
+    #[serde(default)]
+    unified_all_address: String,
     sapling_address: String,
     transparent_address: String,
     created_at_ts: i64,
@@ -67,6 +79,16 @@ struct WalletSnapshot {
     wallet_name: String,
     wallet_fingerprint: String,
     unified_address: String,
+    #[serde(default)]
+    orchard_unified_address: String,
+    #[serde(default)]
+    sapling_unified_address: String,
+    #[serde(default)]
+    unified_orchard_transparent_address: String,
+    #[serde(default)]
+    unified_sapling_transparent_address: String,
+    #[serde(default)]
+    unified_all_address: String,
     sapling_address: String,
     transparent_address: String,
     created_at_ts: i64,
@@ -173,7 +195,7 @@ struct TransferProposalPayload {
     memo: Option<String>,
 }
 
-const FORCED_LIGHTWALLETD_ENDPOINT: &str = "http://65.108.42.251:9067";
+const FORCED_LIGHTWALLETD_ENDPOINT: &str = "http://88.99.165.25:9067";
 
 #[derive(Default)]
 struct MemoryBlockCache {
@@ -515,66 +537,141 @@ fn resolve_wallet_password(
     Ok(pass)
 }
 
-fn derive_real_addresses(normalized_mnemonic: &str, network: &str) -> Result<(String, String, String), String> {
+/// Addresses derived at a single ZIP-32 diversifier index, matching how wallets like Zkool
+/// present a "receive set": when Sapling is invalid at an index, that entire set is skipped;
+/// transparent and Orchard-only receivers are taken from the *same* index as the primary UA,
+/// not from a second independent `find_address` scan (which can land on a different index).
+#[derive(Debug, Clone)]
+struct DerivedWalletAddresses {
+    unified_address: String,
+    orchard_unified_address: String,
+    sapling_unified_address: String,
+    unified_orchard_transparent_address: String,
+    unified_sapling_transparent_address: String,
+    unified_all_address: String,
+    sapling_address: String,
+    transparent_address: String,
+}
+
+fn derive_real_addresses(normalized_mnemonic: &str, network: &str) -> Result<DerivedWalletAddresses, String> {
     let seed = Mnemonic::parse_in_normalized(Language::English, normalized_mnemonic)
         .map_err(|e| format!("mnemonic parse failed: {}", e))?
         .to_seed("");
 
     let account = AccountId::ZERO;
-    let (ua, unified_encoded, sapling_encoded, transparent_encoded) = if network == "testnet" {
+    if network == "testnet" {
         let usk = UnifiedSpendingKey::from_seed(&TEST_NETWORK, &seed, account)
             .map_err(|e| format!("USK derivation failed: {}", e))?;
         let ufvk = usk.to_unified_full_viewing_key();
-        let (ua, _) = ufvk
-            .default_address(UnifiedAddressRequest::ALLOW_ALL)
-            .map_err(|e| format!("default UA derivation failed: {}", e))?;
-        let unified_encoded = ua.encode(&TEST_NETWORK);
-        let sapling_encoded = ua
-            .sapling()
-            .map(|addr| ZcashPoolAddress::Sapling(*addr).encode(&TEST_NETWORK))
-            .unwrap_or_else(|| {
-                log::warn!("wallet address derivation: sapling receiver missing for testnet default UA");
-                String::new()
-            });
-        let transparent_encoded = ua
-            .transparent()
-            .map(|addr| ZcashPoolAddress::Transparent(*addr).encode(&TEST_NETWORK))
-            .unwrap_or_else(|| {
-                log::warn!("wallet address derivation: transparent receiver missing for testnet default UA");
-                String::new()
-            });
-        (ua, unified_encoded, sapling_encoded, transparent_encoded)
+        derive_ufvk_addresses(&ufvk, &TEST_NETWORK)
     } else {
         let usk = UnifiedSpendingKey::from_seed(&MAIN_NETWORK, &seed, account)
             .map_err(|e| format!("USK derivation failed: {}", e))?;
         let ufvk = usk.to_unified_full_viewing_key();
-        let (ua, _) = ufvk
-            .default_address(UnifiedAddressRequest::ALLOW_ALL)
-            .map_err(|e| format!("default UA derivation failed: {}", e))?;
-        let unified_encoded = ua.encode(&MAIN_NETWORK);
-        let sapling_encoded = ua
-            .sapling()
-            .map(|addr| ZcashPoolAddress::Sapling(*addr).encode(&MAIN_NETWORK))
-            .unwrap_or_else(|| {
-                log::warn!("wallet address derivation: sapling receiver missing for mainnet default UA");
-                String::new()
-            });
-        let transparent_encoded = ua
-            .transparent()
-            .map(|addr| ZcashPoolAddress::Transparent(*addr).encode(&MAIN_NETWORK))
-            .unwrap_or_else(|| {
-                log::warn!("wallet address derivation: transparent receiver missing for mainnet default UA");
-                String::new()
-            });
-        (ua, unified_encoded, sapling_encoded, transparent_encoded)
-    };
+        derive_ufvk_addresses(&ufvk, &MAIN_NETWORK)
+    }
+}
 
-    let _ = ua;
-    Ok((
-        unified_encoded,
-        sapling_encoded,
-        transparent_encoded,
-    ))
+fn derive_ufvk_addresses<P: zcash_protocol::consensus::Parameters + Copy>(
+    ufvk: &UnifiedFullViewingKey,
+    params: &P,
+) -> Result<DerivedWalletAddresses, String> {
+    // Zkool-style stable receive-set anchor:
+    // pick the first diversifier index that has Orchard + Sapling, and derive
+    // all presented variants from that same index.
+    let orchard_sapling = UnifiedAddressRequest::custom(
+        ReceiverRequirement::Require,
+        ReceiverRequirement::Require,
+        ReceiverRequirement::Omit,
+    )
+    .map_err(|e| format!("unified address request (orchard + sapling) failed: {}", e))?;
+    let (ua_os, j) = ufvk
+        .find_address(DiversifierIndex::new(), orchard_sapling)
+        .map_err(|e| format!("unified address derivation (orchard + sapling) failed: {}", e))?;
+
+    // UX default unified address: shielded-first (Orchard + Sapling, omit transparent).
+    let unified_address = ua_os.encode(params);
+    let sapling_address = ua_os
+        .sapling()
+        .map(|addr| ZcashPoolAddress::Sapling(*addr).encode(params))
+        .ok_or_else(|| "Sapling receiver missing at chosen diversifier.".to_string())?;
+
+    let orchard_ua = ufvk
+        .address(j, UnifiedAddressRequest::ORCHARD)
+        .map_err(|e| format!("orchard-only unified address failed: {}", e))?;
+    let orchard_unified_address = orchard_ua.encode(params);
+
+    let sapling_only = UnifiedAddressRequest::custom(
+        ReceiverRequirement::Omit,
+        ReceiverRequirement::Require,
+        ReceiverRequirement::Omit,
+    )
+    .map_err(|e| format!("unified address request (sapling only) failed: {}", e))?;
+    let ua_sapling_only = ufvk
+        .address(j, sapling_only)
+        .map_err(|e| format!("sapling-only unified address failed: {}", e))?;
+    let sapling_unified_address = ua_sapling_only.encode(params);
+
+    // Orchard + transparent at same fixed diversifier index.
+    let orchard_transparent = UnifiedAddressRequest::custom(
+        ReceiverRequirement::Require,
+        ReceiverRequirement::Omit,
+        ReceiverRequirement::Require,
+    )
+    .map_err(|e| format!("unified address request (orchard + transparent) failed: {}", e))?;
+    let ua_ot = ufvk
+        .address(j, orchard_transparent)
+        .map_err(|e| format!("unified address (orchard + transparent) failed: {}", e))?;
+    let unified_orchard_transparent_address = ua_ot.encode(params);
+    let transparent_address = ua_ot
+        .transparent()
+        .map(|addr| ZcashPoolAddress::Transparent(*addr).encode(params))
+        .ok_or_else(|| "Transparent receiver missing at chosen diversifier.".to_string())?;
+
+    let sapling_transparent = UnifiedAddressRequest::custom(
+        ReceiverRequirement::Omit,
+        ReceiverRequirement::Require,
+        ReceiverRequirement::Require,
+    )
+    .map_err(|e| format!("unified address request (sapling + transparent) failed: {}", e))?;
+    let ua_st = ufvk
+        .address(j, sapling_transparent)
+        .map_err(|e| format!("unified address (sapling + transparent) failed: {}", e))?;
+    let unified_sapling_transparent_address = ua_st.encode(params);
+    let all_receivers = UnifiedAddressRequest::custom(
+        ReceiverRequirement::Require,
+        ReceiverRequirement::Require,
+        ReceiverRequirement::Require,
+    )
+    .map_err(|e| format!("unified address request (all receivers) failed: {}", e))?;
+    let ua_all = ufvk
+        .address(j, all_receivers)
+        .map_err(|e| format!("unified address (all receivers) failed: {}", e))?;
+    let unified_all_address = ua_all.encode(params);
+
+    // Guard against accidental mismatches across requests at the same diversifier index.
+    let transparent_from_ot = ua_ot
+        .transparent()
+        .map(|addr| ZcashPoolAddress::Transparent(*addr).encode(params))
+        .ok_or_else(|| "Transparent receiver missing in Orchard+Transparent UA.".to_string())?;
+    let transparent_from_st = ua_st
+        .transparent()
+        .map(|addr| ZcashPoolAddress::Transparent(*addr).encode(params))
+        .ok_or_else(|| "Transparent receiver missing in Sapling+Transparent UA.".to_string())?;
+    if transparent_address != transparent_from_ot || transparent_address != transparent_from_st {
+        return Err("Transparent derivation mismatch across unified address variants.".to_string());
+    }
+
+    Ok(DerivedWalletAddresses {
+        unified_address,
+        orchard_unified_address,
+        sapling_unified_address,
+        unified_orchard_transparent_address,
+        unified_sapling_transparent_address,
+        unified_all_address,
+        sapling_address,
+        transparent_address,
+    })
 }
 
 fn default_birthday_height(network: &str) -> u32 {
@@ -590,6 +687,11 @@ fn to_public_snapshot(record: &WalletRecord) -> WalletSnapshot {
         wallet_name: record.wallet_name.clone(),
         wallet_fingerprint: record.wallet_fingerprint.clone(),
         unified_address: record.unified_address.clone(),
+        orchard_unified_address: record.orchard_unified_address.clone(),
+        sapling_unified_address: record.sapling_unified_address.clone(),
+        unified_orchard_transparent_address: record.unified_orchard_transparent_address.clone(),
+        unified_sapling_transparent_address: record.unified_sapling_transparent_address.clone(),
+        unified_all_address: record.unified_all_address.clone(),
         sapling_address: record.sapling_address.clone(),
         transparent_address: record.transparent_address.clone(),
         created_at_ts: record.created_at_ts,
@@ -603,6 +705,11 @@ fn build_preview_snapshot(normalized_mnemonic: &str, network: &str, birthday_hei
         wallet_name: String::new(),
         wallet_fingerprint: deterministic_hex(&format!("fp|{}", normalized_mnemonic), 16),
         unified_address: String::new(),
+        orchard_unified_address: String::new(),
+        sapling_unified_address: String::new(),
+        unified_orchard_transparent_address: String::new(),
+        unified_sapling_transparent_address: String::new(),
+        unified_all_address: String::new(),
         sapling_address: String::new(),
         transparent_address: String::new(),
         created_at_ts: now_unix_ts(),
@@ -617,8 +724,7 @@ fn build_record(
     password: &str,
     wallet_name: Option<&str>,
 ) -> Result<WalletRecord, String> {
-    let (unified_address, sapling_address, transparent_address) =
-        derive_real_addresses(normalized_mnemonic, network)?;
+    let derived = derive_real_addresses(normalized_mnemonic, network)?;
     let (mnemonic_ciphertext_b64, mnemonic_salt_b64, mnemonic_nonce_b64) =
         encrypt_mnemonic(normalized_mnemonic, password)?;
     let fingerprint = deterministic_hex(&format!("fp|{}", normalized_mnemonic), 16);
@@ -635,9 +741,14 @@ fn build_record(
         network: network.to_string(),
         wallet_name: resolved_name,
         wallet_fingerprint: fingerprint,
-        unified_address,
-        sapling_address,
-        transparent_address,
+        unified_address: derived.unified_address,
+        orchard_unified_address: derived.orchard_unified_address,
+        sapling_unified_address: derived.sapling_unified_address,
+        unified_orchard_transparent_address: derived.unified_orchard_transparent_address,
+        unified_sapling_transparent_address: derived.unified_sapling_transparent_address,
+        unified_all_address: derived.unified_all_address,
+        sapling_address: derived.sapling_address,
+        transparent_address: derived.transparent_address,
         created_at_ts: now_unix_ts(),
         birthday_height,
     })
