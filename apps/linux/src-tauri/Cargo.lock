@@ -7173,6 +7173,7 @@ dependencies = [
  "async-trait",
  "base64 0.22.1",
  "bech32",
+ "bip32",
  "bls12_381",
  "bs58",
  "byteorder",
@@ -7193,6 +7194,7 @@ dependencies = [
  "rand_core 0.6.4",
  "rayon",
  "sapling-crypto",
+ "secp256k1",
  "secrecy",
  "shardtree",
  "subtle",
@@ -7221,6 +7223,7 @@ version = "0.20.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1e5e668f550f94a913578708d2a3ac4a4f7c839247e8e14ebd672ab6b6d352b6"
 dependencies = [
+ "bip32",
  "bitflags 2.11.1",
  "bs58",
  "byteorder",
@@ -7241,6 +7244,7 @@ dependencies = [
  "sapling-crypto",
  "schemerz",
  "schemerz-rusqlite",
+ "secp256k1",
  "secrecy",
  "shardtree",
  "static_assertions",
@@ -7334,6 +7338,7 @@ dependencies = [
  "rand_core 0.6.4",
  "redjubjub",
  "sapling-crypto",
+ "secp256k1",
  "sha2 0.10.9",
  "zcash_encoding",
  "zcash_note_encryption",
