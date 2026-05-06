@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { QRCodeSVG } from "qrcode.react";
 import { useSettings, useWalletStore } from "@/stores";
+import { isTransparentReceiverAddress } from "@/lib/zcash-address";
 import { Icon } from "@/components/Icon";
 import { toast } from "@/stores/toast";
 import { useWallet } from "@/hooks/useWallet";
@@ -27,14 +28,21 @@ const PRESET_LABEL: Record<ReceivePreset, string> = {
 };
 
 const PRESET_HELP: Record<ReceivePreset, string> = {
-  recommended: "Default shielded unified address (Orchard + Sapling, no transparent receiver in the UA string).",
-  orchardOnly: "Orchard-only unified address for senders that support Orchard.",
-  saplingOnly: "Sapling-only unified encoding for legacy shielded compatibility.",
-  transparentOnly: "Classic transparent P2PKH address for the same receive index.",
+  recommended:
+    "Shielded-first UA (Orchard + Sapling). Sender picks Orchard or Sapling; funds never land in transparent from this string alone.",
+  orchardOnly:
+    "Orchard-only UA: best privacy vs known modern wallets; legacy senders may be unable to pay.",
+  saplingOnly:
+    "Sapling-only UA (or fallback zs1): for wallets that only support Sapling.",
+  transparentOnly:
+    "Classic transparent at this diversifier index. Funds sit in transparent UTXOs (public graph).",
   orchardSapling: "Same as default shielded-first UA at this diversifier index.",
-  orchardTransparent: "Unified address with Orchard + transparent receivers.",
-  saplingTransparent: "Unified address with Sapling + transparent receivers.",
-  orchardSaplingTransparent: "Full unified address including transparent receiver; not equivalent to “fully shielded.”",
+  orchardTransparent:
+    "UA with Orchard + transparent. Sender may pay Orchard, or transparent if they cannot shield.",
+  saplingTransparent:
+    "UA with Sapling + transparent. Sender may pay Sapling or transparent depending on their wallet.",
+  orchardSaplingTransparent:
+    "Maximum compatibility: Orchard + Sapling + transparent in one UA. Which pool you receive into depends on the sender’s wallet, not this string alone.",
 };
 
 interface AddressBlock {
@@ -67,6 +75,7 @@ export function Receive() {
   });
   const [copiedKey, setCopiedKey] = useState("");
   const [qrPreviewKey, setQrPreviewKey] = useState("");
+  const [howReceivingOpen, setHowReceivingOpen] = useState(false);
 
   const addressesByPreset: Record<ReceivePreset, { addr: string; fallback: boolean }> = {
     recommended: { addr: unifiedAddress, fallback: false },
@@ -117,7 +126,7 @@ export function Receive() {
 
   const presetUnifiedAddr = addressesByPreset[expertPreset].addr;
   const hideUnifiedWhenSameAsTransparent =
-    transparentAddress.startsWith("t1") && presetUnifiedAddr === transparentAddress;
+    isTransparentReceiverAddress(transparentAddress) && presetUnifiedAddr === transparentAddress;
 
   const expertTabBlocks: AddressBlock[] = [
     ...(hideUnifiedWhenSameAsTransparent
@@ -200,6 +209,74 @@ export function Receive() {
         <div style={{ marginBottom: 14, color: "var(--gray-600)", fontSize: 13 }}>
           Pick one mode, copy, and share. Most users should use <strong>Private</strong>.
         </div>
+        <div
+          style={{
+            marginBottom: 16,
+            background: "var(--gray-25)",
+            border: "1px solid var(--gray-100)",
+            borderRadius: "var(--r-md)",
+            textAlign: "left",
+            overflow: "hidden",
+          }}
+        >
+          <button
+            type="button"
+            className="btn btn-ghost"
+            aria-expanded={howReceivingOpen}
+            onClick={() => setHowReceivingOpen((o) => !o)}
+            style={{
+              width: "100%",
+              height: "auto",
+              minHeight: 44,
+              padding: "12px 14px",
+              borderRadius: 0,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              gap: 12,
+              textAlign: "left",
+              fontWeight: 600,
+              color: "var(--gray-800)",
+            }}
+          >
+            <span className="t-body-med" style={{ flex: 1, minWidth: 0 }}>
+              How receiving works on Zcash
+            </span>
+            <span
+              aria-hidden
+              style={{
+                display: "flex",
+                flexShrink: 0,
+                color: "var(--gray-500)",
+                transition: "transform 160ms ease",
+                transform: howReceivingOpen ? "rotate(90deg)" : "rotate(0deg)",
+              }}
+            >
+              <Icon name="chevron-right" size={18} />
+            </span>
+          </button>
+          {howReceivingOpen && (
+            <div style={{ padding: "0 14px 14px", borderTop: "1px solid var(--gray-100)" }}>
+              <ul className="t-caption text-gray-600" style={{ margin: "10px 0 0", paddingLeft: 18, lineHeight: 1.55 }}>
+                <li>
+                  <strong>Transparent (t…):</strong> funds land in transparent UTXOs — low privacy, common for exchanges.
+                </li>
+                <li>
+                  <strong>Sapling (zs…):</strong> funds land in the Sapling shielded pool.
+                </li>
+                <li>
+                  <strong>Orchard-only UA (u… with Orchard only):</strong> funds land in Orchard when the sender supports it.
+                </li>
+                <li>
+                  <strong>Unified with several receivers:</strong> the <em>sender’s</em> wallet chooses which embedded receiver it can pay (often Orchard, else Sapling, else transparent). The same UA string can therefore credit Orchard, Sapling, or transparent depending on them, not you.
+                </li>
+                <li>
+                  <strong>Guidance:</strong> share the full Orchard+Sapling+transparent UA for max compatibility; Orchard-only UA for max privacy with modern peers; standalone transparent only when the other party requires it.
+                </li>
+              </ul>
+            </div>
+          )}
+        </div>
 
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: 12 }}>
           {baseBlocks.map((item) => (
@@ -227,7 +304,7 @@ export function Receive() {
               Expert: tab-based address combinations
             </div>
             <div style={{ marginBottom: 10, color: "var(--gray-600)", fontSize: 12 }}>
-              Pick a combination tab. For each tab, unified + orchard-only + sapling + transparent are shown together for easy comparison.
+              Multi-select pools to see the UA variant for that combination. Rows below are for comparison; old senders may only support a subset of receivers.
             </div>
             <div className="hstack gap-4" style={{ background: "var(--gray-25)", border: "1px solid var(--gray-100)", borderRadius: "var(--r-pill)", padding: 4, justifyContent: "center", marginBottom: 12, flexWrap: "wrap" }}>
               {([

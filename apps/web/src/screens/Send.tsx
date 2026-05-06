@@ -1,20 +1,14 @@
 import { useEffect, useState } from "react";
 import { useSettings, useWalletStore } from "@/stores";
 import { fmtZec, zecToZat } from "@/lib/zec";
+import { classifySendRecipient, surfaceKindFromRecipient } from "@/lib/zcash-address";
 import { Icon } from "@/components/Icon";
 import { toast } from "@/stores/toast";
 import { useWallet } from "@/hooks/useWallet";
 
-function classifyRecipient(addr: string): "private" | "public" | "invalid" {
-  const t = addr.trim();
-  if (t.startsWith("u1") || t.startsWith("zs1")) return "private";
-  if (t.startsWith("t1")) return "public";
-  return "invalid";
-}
-
 export function Send() {
   const expertAddressMode = useSettings((s) => s.expertAddressMode);
-  const { spendableZat, zecUsdPrice } = useWalletStore();
+  const { spendableZat, pendingZat, zecUsdPrice } = useWalletStore();
   const [addr, setAddr] = useState("");
   const [amt, setAmt] = useState("");
   const [memo, setMemo] = useState("");
@@ -22,18 +16,18 @@ export function Send() {
   const [publicSendConfirmed, setPublicSendConfirmed] = useState(false);
   const walletApi = useWallet();
 
-  const kind = classifyRecipient(addr);
+  const kind = classifySendRecipient(addr);
   const max = Number(spendableZat) / 1e8;
 
   useEffect(() => {
     setPublicSendConfirmed(false);
   }, [addr]);
 
-  const expertLabel = addr.trim() && expertAddressMode
-    ? (addr.trim().startsWith("u1") ? { text: "Unified address (UA)", className: "pill-info" as const }
-      : addr.trim().startsWith("zs1") ? { text: "Sapling", className: "pill-success" as const }
-        : addr.trim().startsWith("t1") ? { text: "Transparent", className: "pill-warning" as const }
-        : null)
+  const surface = addr.trim() ? surfaceKindFromRecipient(addr) : null;
+  const expertLabel = addr.trim() && expertAddressMode && surface && surface !== "unknown"
+    ? (surface === "unified" ? { text: "Unified address (UA)", className: "pill-info" as const }
+      : surface === "sapling" ? { text: "Sapling (zs / ztestsapling)", className: "pill-success" as const }
+        : { text: "Transparent (t1 / t3 / tm / t2)", className: "pill-warning" as const })
     : null;
 
   const simpleLabel = addr.trim() && !expertAddressMode && kind !== "invalid"
@@ -43,7 +37,11 @@ export function Send() {
   async function handleSend() {
     if (!addr || !amt) return;
     if (kind === "invalid") {
-      toast({ type: "error", title: "Invalid address", description: "Paste a valid Zcash address (starts with u1, zs1, or t1)." });
+      toast({
+        type: "danger",
+        title: "Invalid address",
+        description: "Paste a valid Zcash address for this wallet network (UA, Sapling, or transparent). Unknown prefixes are rejected here; the wallet still validates on send.",
+      });
       return;
     }
     if (kind === "public" && !publicSendConfirmed) {
@@ -53,11 +51,11 @@ export function Send() {
     setSubmitting(true);
     try {
       const memoOut = kind === "private" ? (memo.trim() || undefined) : undefined;
-      const txid = await walletApi.sendZec(addr.trim(), zecToZat(Number(amt)), memoOut);
+      const txid = await walletApi.sendZec(addr.trim(), Number(zecToZat(Number(amt))), memoOut);
       toast({ type: "success", title: "Transaction broadcast", description: `TxID: ${txid}` });
     } catch (error) {
       const detail = error instanceof Error ? error.message : "Could not broadcast transaction.";
-      toast({ type: "error", title: "Send failed", description: detail });
+      toast({ type: "danger", title: "Send failed", description: detail });
     } finally {
       setSubmitting(false);
     }
@@ -73,7 +71,7 @@ export function Send() {
           className="input mono"
           value={addr}
           onChange={(e) => setAddr(e.target.value)}
-          placeholder={expertAddressMode ? "u1..., zs1..., or t1..." : "Paste the address you were given"}
+          placeholder={expertAddressMode ? "u1… / utest… / zs1… / ztestsapling… / t1… / t3… / tm…" : "Paste the address you were given"}
         />
         {expertLabel && <span className={`pill ${expertLabel.className}`} style={{ marginTop: 8 }}>{expertLabel.text}</span>}
         {simpleLabel && <span className={`pill ${simpleLabel.className}`} style={{ marginTop: 8 }}>{simpleLabel.text}</span>}
@@ -109,6 +107,11 @@ export function Send() {
               <span className="t-caption text-gray-400">≈ ${(parseFloat(amt || "0") * zecUsdPrice).toFixed(2)} USD</span>
               <button className="t-caption text-coral" onClick={() => setAmt(max.toString())}>Max ({fmtZec(spendableZat)})</button>
             </div>
+            {pendingZat > 0 && (
+              <div className="t-caption text-gray-400" style={{ marginTop: 4 }}>
+                Pending funds are excluded from Max: {fmtZec(pendingZat)}
+              </div>
+            )}
           </div>
         </div>
 
@@ -130,6 +133,26 @@ export function Send() {
             The recipient will only see this if their wallet supports shielded memos.
           </p>
         )}
+
+        {/* {expertAddressMode && (
+          <div style={{ marginTop: 18, padding: 14, background: "var(--gray-25)", border: "1px solid var(--gray-100)", borderRadius: "var(--r-md)", textAlign: "left" }}>
+            <div className="t-body-med" style={{ marginBottom: 8 }}>How sending maps to on-chain pools</div>
+            <ul className="t-caption text-gray-600" style={{ margin: 0, paddingLeft: 18, lineHeight: 1.55 }}>
+              <li>
+                <strong>Source notes:</strong> this wallet may spend Orchard, Sapling, and transparent inputs in one transaction when the proposal succeeds (mixed-source sends).
+              </li>
+              <li>
+                <strong>Unified (UA) recipients:</strong> your payment targets whichever embedded receiver their wallet chooses (often Orchard if available, else Sapling, else transparent when present).
+              </li>
+              <li>
+                <strong>Cross-pool:</strong> shielded→transparent (deshield), transparent→shielded (shield), and Orchard↔Sapling are normal paths when consensus and balances allow.
+              </li>
+              <li>
+                <strong>If send fails with “insufficient”:</strong> check per-pool balances on the Dashboard (Expert) — you may have enough total ZEC but not enough in the pools needed for that destination and fee.
+              </li>
+            </ul>
+          </div>
+        )} */}
 
         <div style={{ marginTop: 16, padding: 12, background: "var(--gray-25)", borderRadius: "var(--r-md)" }} className="hstack between">
           <span className="t-caption text-gray-600">Network fee</span>
