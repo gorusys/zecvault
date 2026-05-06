@@ -18,9 +18,13 @@ export function Sidebar() {
   const setSyncStatus = useWalletStore((s) => s.setSyncStatus);
   const setSyncMetrics = useWalletStore((s) => s.setSyncMetrics);
   const setBalances = useWalletStore((s) => s.setBalances);
+  const applyWalletSnapshot = useWalletStore((s) => s.applyWalletSnapshot);
   const setMarketData = useWalletStore((s) => s.setMarketData);
   const walletApi = useWallet();
   const syncInFlight = useRef(false);
+  const syncCooldownUntilRef = useRef(0);
+  const syncFailureCountRef = useRef(0);
+  const retryTimerRef = useRef<number | null>(null);
   const activeVaultCount = vaults.filter(
     (v) => (v.walletFingerprint || (activeWalletFingerprint || fallbackWalletFingerprint)) === (activeWalletFingerprint || fallbackWalletFingerprint),
   ).length;
@@ -46,14 +50,55 @@ export function Sidebar() {
   useEffect(() => {
     let dispose = () => {};
     let stopped = false;
+    let tipInFlight = false;
 
-    const refreshBalance = async () => {
+    const refreshBalanceLight = async () => {
       try {
         const bal = await walletApi.getBalance();
-        const total = bal.orchardZat + bal.saplingZat + bal.transparentZat;
-        setBalances({ totalZat: total, spendableZat: total, pendingZat: bal.pendingZat });
-      } catch {
-        // Keep previous values on transient network/native errors.
+        const poolTotal = bal.orchardZat + bal.saplingZat + bal.transparentZat;
+        const spendable = typeof bal.spendableZat === "number"
+          ? bal.spendableZat
+          : Math.max(0, poolTotal - bal.pendingZat);
+        // Some native snapshots can temporarily report `total` behind pending updates.
+        // Keep UI coherent by deriving total from spendable + pending when higher.
+        const totalFromApi = typeof bal.totalZat === "number" ? bal.totalZat : poolTotal;
+        const totalFromParts = spendable + bal.pendingZat;
+        const total = Math.max(totalFromApi, totalFromParts, poolTotal);
+        setBalances({
+          totalZat: total,
+          spendableZat: spendable,
+          pendingZat: bal.pendingZat,
+          orchardZat: bal.orchardZat,
+          saplingZat: bal.saplingZat,
+          transparentZat: bal.transparentZat,
+        });
+        console.info(
+          "[zecvault][balance] orchard=%d sapling=%d transparent=%d pending=%d total=%d spendable=%d",
+          bal.orchardZat,
+          bal.saplingZat,
+          bal.transparentZat,
+          bal.pendingZat,
+          total,
+          spendable,
+        );
+      } catch (e) {
+        console.warn("[zecvault] getBalance failed", e);
+      }
+    };
+
+    const refreshBalanceWithReconcile = async () => {
+      try {
+        try {
+          const snapshot = await walletApi.reconcileDerivedAddresses();
+          if (snapshot) {
+            applyWalletSnapshot(snapshot);
+          }
+        } catch (e) {
+          console.warn("[zecvault] reconcileDerivedAddresses failed", e);
+        }
+        await refreshBalanceLight();
+      } catch (e) {
+        console.warn("[zecvault] refreshBalanceWithReconcile failed", e);
       }
     };
 
@@ -80,16 +125,40 @@ export function Sidebar() {
       }
     };
 
+    const refreshChainTip = async () => {
+      if (tipInFlight) return;
+      tipInFlight = true;
+      try {
+        const latestTip = await walletApi.getLatestBlockHeight();
+        if (!Number.isFinite(latestTip) || latestTip <= 0) return;
+        const current = useWalletStore.getState().syncBlock;
+        if (latestTip > current) {
+          const currentProgress = useWalletStore.getState().syncProgress;
+          setSyncMetrics({ syncProgress: currentProgress, syncBlock: Math.max(current, latestTip) });
+          console.info("[zecvault][tip] latest=%d previous=%d", latestTip, current);
+        }
+      } catch (e) {
+        console.warn("[zecvault] getLatestBlockHeight failed", e);
+      } finally {
+        tipInFlight = false;
+      }
+    };
+
     const startSyncCycle = async () => {
       if (syncInFlight.current) return;
+      if (Date.now() < syncCooldownUntilRef.current) return;
       syncInFlight.current = true;
+      syncCooldownUntilRef.current = Date.now() + 8_000;
       try {
         dispose();
+        setSyncStatus("syncing");
         dispose = await walletApi.startSync(
           (progress) => {
             const pct = progress.total > 0 ? Math.round((progress.height / progress.total) * 100) : 0;
             setSyncStatus(pct >= 100 ? "synced" : "syncing");
-            setSyncMetrics({ syncProgress: pct, syncBlock: progress.total });
+            const current = useWalletStore.getState().syncBlock;
+            setSyncMetrics({ syncProgress: pct, syncBlock: Math.max(current, progress.total) });
+            console.info("[zecvault][sync] progress height=%d total=%d pct=%d", progress.height, progress.total, pct);
           },
           () => {
             // Avoid sync storms: balance-updated can fire many times per sync pass.
@@ -97,26 +166,58 @@ export function Sidebar() {
           },
           (result) => {
             syncInFlight.current = false;
-            if (result?.ok === false) {
-              setSyncStatus("error");
+            if (result?.skipped) {
+              // Another sync run is currently active in backend; wait for the next regular cycle.
               return;
             }
+            if (result?.ok === false) {
+              syncFailureCountRef.current += 1;
+              const retryDelayMs = Math.min(120_000, 5_000 * 2 ** Math.min(syncFailureCountRef.current, 4));
+              setSyncStatus("error");
+              console.warn("[zecvault][sync] failed; retrying in %dms", retryDelayMs, result.error);
+              if (retryTimerRef.current !== null) window.clearTimeout(retryTimerRef.current);
+              retryTimerRef.current = window.setTimeout(() => {
+                if (!stopped) void startSyncCycle();
+              }, retryDelayMs);
+              void refreshBalanceWithReconcile();
+              return;
+            }
+            syncFailureCountRef.current = 0;
             setSyncStatus("synced");
-            void refreshBalance();
+            console.info("[zecvault][sync] complete");
+            void refreshBalanceWithReconcile();
           },
         );
-      } catch {
+      } catch (e) {
         syncInFlight.current = false;
+        syncFailureCountRef.current += 1;
         setSyncStatus("error");
+        console.warn("[zecvault] startSync failed", e);
+        const retryDelayMs = Math.min(120_000, 5_000 * 2 ** Math.min(syncFailureCountRef.current, 4));
+        if (retryTimerRef.current !== null) window.clearTimeout(retryTimerRef.current);
+        retryTimerRef.current = window.setTimeout(() => {
+          if (!stopped) void startSyncCycle();
+        }, retryDelayMs);
+        void refreshBalanceWithReconcile();
       }
     };
 
+    void refreshBalanceWithReconcile();
     void startSyncCycle();
+    void refreshChainTip();
     void refreshMarketPrice();
-    const timer = setInterval(() => {
+    const balancePoll = setInterval(() => {
+      if (stopped) return;
+      void refreshBalanceLight();
+    }, 30_000);
+    const chainResync = setInterval(() => {
       if (stopped) return;
       void startSyncCycle();
-    }, 30_000);
+    }, 5 * 60_000);
+    const tipPoll = setInterval(() => {
+      if (stopped) return;
+      void refreshChainTip();
+    }, 5_000);
     const priceTimer = setInterval(() => {
       if (stopped) return;
       void refreshMarketPrice();
@@ -125,11 +226,16 @@ export function Sidebar() {
     return () => {
       stopped = true;
       syncInFlight.current = false;
-      clearInterval(timer);
+      if (retryTimerRef.current !== null) {
+        window.clearTimeout(retryTimerRef.current);
+      }
+      clearInterval(balancePoll);
+      clearInterval(chainResync);
+      clearInterval(tipPoll);
       clearInterval(priceTimer);
       dispose();
     };
-  }, [setBalances, setMarketData, setSyncMetrics, setSyncStatus]);
+  }, [applyWalletSnapshot, setBalances, setMarketData, setSyncMetrics, setSyncStatus, walletApi]);
 
   return (
     <aside className="sidebar">

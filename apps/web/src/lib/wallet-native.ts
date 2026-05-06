@@ -212,6 +212,14 @@ export async function getWalletStateNative(): Promise<NativeOpResponse> {
   return { ok: false };
 }
 
+/** Re-derive receive addresses from seed and persist to native store (align UI with wallet DB). */
+export async function reconcileWalletDerivedAddressesNative(): Promise<NativeOpResponse> {
+  if (!isTauriRuntime()) {
+    return { ok: false, error: "Native runtime unavailable." };
+  }
+  return invokeTauri<NativeOpResponse>("wallet_reconcile_derived_addresses", undefined, 30_000);
+}
+
 export async function listWalletsNative(): Promise<NativeWalletListResponse> {
   if (isTauriRuntime()) {
     try {

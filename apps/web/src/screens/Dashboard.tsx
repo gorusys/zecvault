@@ -12,7 +12,25 @@ import { toast } from "@/stores/toast";
 export function Dashboard() {
   const userName = useSettings((s) => s.userName);
   const expertAddressMode = useSettings((s) => s.expertAddressMode);
-  const { totalZat, spendableZat, zecUsdPrice, priceChange24h, txHistory, syncStatus, syncProgress, unifiedAddress, saplingAddress, transparentAddress, wallets, activeWalletFingerprint, walletFingerprint } = useWalletStore();
+  const {
+    totalZat,
+    spendableZat,
+    pendingZat,
+    zecUsdPrice,
+    priceChange24h,
+    txHistory,
+    syncStatus,
+    syncProgress,
+    unifiedAddress,
+    saplingAddress,
+    transparentAddress,
+    wallets,
+    activeWalletFingerprint,
+    walletFingerprint,
+    orchardZat,
+    saplingZat,
+    transparentZat,
+  } = useWalletStore();
   const vaults = useVaultStore((s) => s.vaults);
   const archive = useVaultStore((s) => s.archive);
   const [showNewVault, setShowNewVault] = useState(false);
@@ -92,9 +110,15 @@ export function Dashboard() {
                     Public receive {truncateAddress(displayTransparent)}
                   </button>
                 )}
-                <Link to="/receive" className="t-caption text-coral" style={{ textDecoration: "underline" }}>
-                  Change receive mode
-                </Link>
+                {/* <Link
+                  to="/receive"
+                  className="btn btn-ghost"
+                  title="Open Receive for QR codes, all address types, and optional expert combinations"
+                  style={{ height: 32, padding: "0 12px", display: "inline-flex", alignItems: "center", gap: 6, flexShrink: 0 }}
+                >
+                  <Icon name="receive" size={14} />
+                  Receive
+                </Link> */}
               </>
             )}
           </div>
@@ -125,7 +149,7 @@ export function Dashboard() {
         <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 0 }}>
           <Stat label="Total balance" value={Number(totalZat) / 1e8} fiat={fmtFiat(totalZat, zecUsdPrice)} color="var(--gray-800)" />
           <Stat label="Locked in vaults" value={lockedZat / 1e8} fiat={fmtFiat(lockedZat, zecUsdPrice)} color="var(--coral-400)" divider />
-          <Stat label="Spendable" value={Number(spendableZat) / 1e8} fiat={fmtFiat(spendableZat, zecUsdPrice)} color="var(--success-strong)" divider />
+          <Stat label="Available to send" value={Number(spendableZat) / 1e8} fiat={fmtFiat(spendableZat, zecUsdPrice)} color="var(--success-strong)" divider />
           <div style={{ paddingLeft: 24, borderLeft: "1px solid var(--gray-100)" }}>
             <div className="t-label">ZEC price</div>
             <div className="hstack gap-8" style={{ marginTop: 6 }}>
@@ -138,7 +162,43 @@ export function Dashboard() {
             <div className="t-caption text-gray-400" style={{ marginTop: 4 }}>24h change</div>
           </div>
         </div>
+        {expertAddressMode && (orchardZat > 0 || saplingZat > 0 || transparentZat > 0 || totalZat > 0) && (
+          <div style={{ marginTop: 16, paddingTop: 16, borderTop: "1px solid var(--gray-100)", textAlign: "left" }}>
+            <div className="t-label" style={{ marginBottom: 8 }}>Spendable by pool (synced)</div>
+            <div className="hstack gap-10" style={{ flexWrap: "wrap" }}>
+              <span className="t-caption text-gray-600">
+                Orchard: <span className="t-mono">{fmtZec(orchardZat)}</span>
+              </span>
+              <span className="t-caption text-gray-600">
+                Sapling: <span className="t-mono">{fmtZec(saplingZat)}</span>
+              </span>
+              <span className="t-caption text-gray-600">
+                Transparent: <span className="t-mono">{fmtZec(transparentZat)}</span>
+              </span>
+            </div>
+            <p className="t-caption text-gray-400" style={{ marginTop: 8, marginBottom: 0 }}>
+              Cross-pool sends combine pools when the wallet can build a valid ZIP 317 proposal. If one pool is short, try a smaller amount or move value between pools with an intermediate send to yourself.
+            </p>
+          </div>
+        )}
       </div>
+      {totalZat === 0 && wallets.length > 1 && (
+        <div className="card card-pad" style={{ marginBottom: 20, textAlign: "left", borderColor: "var(--warning-200)" }}>
+          <div className="t-body-med" style={{ marginBottom: 6 }}>Active wallet has zero balance</div>
+          <p className="t-caption text-gray-600" style={{ marginBottom: 10 }}>
+            You have multiple wallets in this app. Your funds may be in another wallet profile.
+          </p>
+          <Link to="/wallets" className="btn btn-ghost" style={{ height: 32, padding: "0 12px", display: "inline-flex", alignItems: "center", gap: 6 }}>
+            <Icon name="wallet" size={14} />
+            Switch wallet
+          </Link>
+        </div>
+      )}
+      {pendingZat > 0 && (
+        <p className="t-caption text-gray-500" style={{ marginTop: 10, marginBottom: 0 }}>
+          Pending (not spendable yet): <span className="t-mono">{fmtZec(pendingZat)}</span>
+        </p>
+      )}
 
       {/* Vaults section */}
       <div className="hstack between" style={{ marginBottom: 14 }}>

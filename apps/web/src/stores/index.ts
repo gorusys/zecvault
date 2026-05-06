@@ -66,6 +66,10 @@ interface WalletState {
   totalZat: number;
   spendableZat: number;
   pendingZat: number;
+  /** Per-pool confirmed funds (from native sync); used for expert UX. */
+  orchardZat: number;
+  saplingZat: number;
+  transparentZat: number;
   unifiedAddress: string;
   orchardUnifiedAddress: string;
   saplingUnifiedAddress: string;
@@ -86,7 +90,14 @@ interface WalletState {
   addTx: (tx: TxRecord) => void;
   setSyncStatus: (s: SyncStatus) => void;
   setSyncMetrics: (input: { syncProgress: number; syncBlock: number }) => void;
-  setBalances: (input: { totalZat: number; spendableZat: number; pendingZat: number }) => void;
+  setBalances: (input: {
+    totalZat: number;
+    spendableZat: number;
+    pendingZat: number;
+    orchardZat: number;
+    saplingZat: number;
+    transparentZat: number;
+  }) => void;
   setMarketData: (input: { zecUsdPrice: number; priceChange24h: number }) => void;
 }
 
@@ -105,6 +116,9 @@ export const useWalletStore = create<WalletState>()(
       totalZat: 0,
       spendableZat: 0,
       pendingZat: 0,
+      orchardZat: 0,
+      saplingZat: 0,
+      transparentZat: 0,
       unifiedAddress: "",
       orchardUnifiedAddress: "",
       saplingUnifiedAddress: "",
@@ -126,6 +140,9 @@ export const useWalletStore = create<WalletState>()(
         totalZat: 0,
         spendableZat: 0,
         pendingZat: 0,
+        orchardZat: 0,
+        saplingZat: 0,
+        transparentZat: 0,
         unifiedAddress: "",
         orchardUnifiedAddress: "",
         saplingUnifiedAddress: "",
@@ -139,6 +156,9 @@ export const useWalletStore = create<WalletState>()(
       applyWalletSnapshot: (snapshot) => set((state) => {
         const wallets = state.wallets.filter((w) => w.walletFingerprint !== snapshot.walletFingerprint);
         wallets.unshift(snapshot);
+        const sameActive =
+          state.activeWalletFingerprint === snapshot.walletFingerprint
+          || state.walletFingerprint === snapshot.walletFingerprint;
         return {
           isInitialized: true,
           wallets,
@@ -154,14 +174,21 @@ export const useWalletStore = create<WalletState>()(
           unifiedAllAddress: snapshot.unifiedAllAddress ?? "",
           saplingAddress: snapshot.saplingAddress,
           transparentAddress: snapshot.transparentAddress,
-          txHistory: [],
-          totalZat: 0,
-          spendableZat: 0,
-          pendingZat: 0,
+          txHistory: sameActive ? state.txHistory : [],
+          totalZat: sameActive ? state.totalZat : 0,
+          spendableZat: sameActive ? state.spendableZat : 0,
+          pendingZat: sameActive ? state.pendingZat : 0,
+          orchardZat: sameActive ? state.orchardZat : 0,
+          saplingZat: sameActive ? state.saplingZat : 0,
+          transparentZat: sameActive ? state.transparentZat : 0,
         };
       }),
-      setWallets: (wallets, activeWalletFingerprint) => set(() => {
+      setWallets: (wallets, activeWalletFingerprint) => set((state) => {
         const active = wallets.find((w) => w.walletFingerprint === activeWalletFingerprint) ?? wallets[0];
+        const sameActive =
+          Boolean(active?.walletFingerprint)
+          && (state.activeWalletFingerprint === active?.walletFingerprint
+            || state.walletFingerprint === active?.walletFingerprint);
         return {
           wallets,
           isInitialized: wallets.length > 0,
@@ -177,10 +204,13 @@ export const useWalletStore = create<WalletState>()(
           unifiedAllAddress: active?.unifiedAllAddress ?? "",
           saplingAddress: active?.saplingAddress ?? "",
           transparentAddress: active?.transparentAddress ?? "",
-          txHistory: [],
-          totalZat: 0,
-          spendableZat: 0,
-          pendingZat: 0,
+          txHistory: sameActive ? state.txHistory : [],
+          totalZat: sameActive ? state.totalZat : 0,
+          spendableZat: sameActive ? state.spendableZat : 0,
+          pendingZat: sameActive ? state.pendingZat : 0,
+          orchardZat: sameActive ? state.orchardZat : 0,
+          saplingZat: sameActive ? state.saplingZat : 0,
+          transparentZat: sameActive ? state.transparentZat : 0,
         };
       }),
       setActiveWallet: (walletFingerprint) => set((state) => {
@@ -203,6 +233,9 @@ export const useWalletStore = create<WalletState>()(
           totalZat: 0,
           spendableZat: 0,
           pendingZat: 0,
+          orchardZat: 0,
+          saplingZat: 0,
+          transparentZat: 0,
         };
       }),
       createWalletFromMnemonic: (mnemonic, network) => {
@@ -226,6 +259,9 @@ export const useWalletStore = create<WalletState>()(
           totalZat: 0,
           spendableZat: 0,
           pendingZat: 0,
+          orchardZat: 0,
+          saplingZat: 0,
+          transparentZat: 0,
         });
       },
       restoreWalletFromMnemonic: (mnemonic, network) => {
@@ -242,10 +278,13 @@ export const useWalletStore = create<WalletState>()(
         syncProgress,
         syncBlock,
       }),
-      setBalances: ({ totalZat, spendableZat, pendingZat }) => set({
+      setBalances: ({ totalZat, spendableZat, pendingZat, orchardZat, saplingZat, transparentZat }) => set({
         totalZat,
         spendableZat,
         pendingZat,
+        orchardZat,
+        saplingZat,
+        transparentZat,
       }),
       setMarketData: ({ zecUsdPrice, priceChange24h }) => set({
         zecUsdPrice,
