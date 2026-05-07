@@ -38,6 +38,7 @@ tauri-plugin-log = "2"
 tauri-plugin-store = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-fs = "2"
+tauri-plugin-opener = "2"
 # `transparent-inputs` is required so sync queries lightwalletd for t-address UTXOs; without it,
 # shielded notes sync but transparent receives (e.g. t1…) never appear in the balance.
 zcash_client_sqlite = { version = "0.20.0", features = ["orchard", "transparent-inputs"] }
@@ -45,3 +46,4 @@ zcash_client_backend = { version = "0.22.0", features = ["orchard", "sync", "lig
 zcash_proofs = { version = "0.27.0", features = ["bundled-prover"] }
 secrecy = "0.8"
 async-trait = "0.1.89"
+rusqlite = "0.37.0"

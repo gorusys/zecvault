@@ -7,6 +7,7 @@ use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine as _;
 use bip39::{Language, Mnemonic};
 use rand::RngCore;
+use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use secrecy::SecretVec;
 use std::fs;
@@ -21,7 +22,7 @@ use zcash_client_backend::data_api::wallet::{
     propose_standard_transfer_to_address,
 };
 use zcash_client_backend::data_api::chain::{BlockCache, BlockSource};
-use zcash_client_backend::data_api::{AccountBirthday, InputSource, WalletRead, WalletWrite};
+use zcash_client_backend::data_api::{Account as WalletAccount, AccountBirthday, AccountSource, InputSource, WalletRead, WalletWrite};
 use zcash_client_backend::fees::StandardFeeRule;
 use zcash_client_backend::proto::compact_formats::CompactBlock;
 use zcash_client_backend::proto::service::{self, compact_tx_streamer_client::CompactTxStreamerClient};
@@ -39,6 +40,7 @@ use zcash_protocol::ShieldedProtocol;
 use zcash_protocol::consensus::{BlockHeight, MAIN_NETWORK, TEST_NETWORK};
 use zcash_protocol::memo::Memo;
 use zcash_protocol::value::Zatoshis;
+use zcash_protocol::TxId;
 use zip32::AccountId;
 
 /// Serializes `start_sync` chain scans so two runs never open/write the same wallet DB concurrently
@@ -203,7 +205,7 @@ struct TransferProposalPayload {
     memo: Option<String>,
 }
 
-const FORCED_LIGHTWALLETD_ENDPOINT: &str = "http://88.99.165.25:9067";
+const DEFAULT_LIGHTWALLETD_ENDPOINT: &str = "http://88.99.165.25:9067";
 
 /// Blocks per `sync::run` download/scan step. The upstream default in sample code is often 100;
 /// values around 1k–2k cut lightwalletd round-trips dramatically for long historical scans.
@@ -884,8 +886,20 @@ fn lightwalletd_file(app: &tauri::AppHandle) -> Result<PathBuf, String> {
 }
 
 fn load_lightwalletd_endpoint(app: &tauri::AppHandle) -> Result<String, String> {
-    let _ = app;
-    Ok(FORCED_LIGHTWALLETD_ENDPOINT.to_string())
+    let cfg_path = lightwalletd_file(app)?;
+    if !cfg_path.exists() {
+        return Ok(DEFAULT_LIGHTWALLETD_ENDPOINT.to_string());
+    }
+    let raw = fs::read(&cfg_path).map_err(|e| format!("config read failed: {}", e))?;
+    let parsed: serde_json::Value =
+        serde_json::from_slice(&raw).map_err(|e| format!("config parse failed: {}", e))?;
+    let url = parsed
+        .get("url")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(DEFAULT_LIGHTWALLETD_ENDPOINT);
+    Ok(url.to_string())
 }
 
 fn normalize_grpc_endpoint(raw: &str) -> String {
@@ -906,8 +920,24 @@ fn normalize_grpc_endpoint(raw: &str) -> String {
 }
 
 fn lightwalletd_endpoint_candidates(configured: &str, network: &str) -> Vec<String> {
-    let _ = (configured, network);
-    vec![FORCED_LIGHTWALLETD_ENDPOINT.to_string()]
+    let mut out = Vec::<String>::new();
+    let mut push_unique = |url: &str| {
+        let normalized = normalize_grpc_endpoint(url);
+        if !out.iter().any(|e| e == &normalized) {
+            out.push(normalized);
+        }
+    };
+    push_unique(configured);
+    match network {
+        "mainnet" => {
+            push_unique("http://88.99.165.25:9067");
+        }
+        "testnet" => {
+            push_unique("http://88.99.165.25:19067");
+        }
+        _ => {}
+    }
+    out
 }
 
 async fn select_lightwalletd_endpoint(candidates: &[String]) -> Result<String, String> {
@@ -1679,18 +1709,18 @@ async fn get_balance(app: tauri::AppHandle) -> Result<BalanceInfo, String> {
         };
         match res {
             Ok(mut bal) => {
-                if bal.total_zat == 0 && !wallet.transparent_address.trim().is_empty() {
+                if !wallet.transparent_address.trim().is_empty() {
                     let endpoint = normalize_grpc_endpoint(&load_lightwalletd_endpoint(&app)?);
                     match fetch_transparent_balance_fallback(&endpoint, wallet.transparent_address.trim()).await
                     {
-                        Ok(tb) if tb > 0 => {
+                        Ok(tb) if tb > bal.transparent_zat => {
+                            let previous = bal.transparent_zat;
                             bal.transparent_zat = tb;
-                            bal.total_zat = tb;
-                            bal.spendable_zat = tb;
                             log::info!(
-                                "get_balance transparent fallback hit: wallet={} taddr={} value={}",
+                                "get_balance transparent fallback merged: wallet={} taddr={} previous={} merged={}",
                                 wallet.wallet_fingerprint,
                                 wallet.transparent_address,
+                                previous,
                                 tb
                             );
                         }
@@ -1705,6 +1735,12 @@ async fn get_balance(app: tauri::AppHandle) -> Result<BalanceInfo, String> {
                         }
                     }
                 }
+                let pool_total = bal
+                    .orchard_zat
+                    .saturating_add(bal.sapling_zat)
+                    .saturating_add(bal.transparent_zat);
+                bal.total_zat = bal.total_zat.max(pool_total);
+                bal.spendable_zat = bal.total_zat.saturating_sub(bal.pending_zat);
                 log::info!(
                     "get_balance wallet={} network={} db_path={} orchard={} sapling={} transparent={} pending={} total={} spendable={}",
                     wallet.wallet_fingerprint,
@@ -1789,6 +1825,7 @@ async fn execute_transfer(app: tauri::AppHandle, proposal_json: String) -> Resul
         .to_seed("");
     let endpoint = normalize_grpc_endpoint(&load_lightwalletd_endpoint(&app)?);
     let endpoint_candidates = lightwalletd_endpoint_candidates(&endpoint, wallet.network.as_str());
+    let selected_endpoint = select_lightwalletd_endpoint(&endpoint_candidates).await?;
 
     let memo_bytes = if let Some(memo) = proposal.memo.clone().filter(|m| !m.trim().is_empty()) {
         Some(
@@ -1799,13 +1836,21 @@ async fn execute_transfer(app: tauri::AppHandle, proposal_json: String) -> Resul
     } else {
         None
     };
+    log::info!(
+        "execute_transfer requested: wallet={} network={} to={} amount_zat={} memo={}",
+        wallet.wallet_fingerprint,
+        wallet.network,
+        proposal.to.trim(),
+        proposal.amount_zat,
+        if memo_bytes.is_some() { "yes" } else { "no" }
+    );
+
+    // Serialize sends with background sync and other send operations to avoid SQLite races.
+    let _sync_guard = LIGHTWALLETD_SYNC_LOCK.lock().await;
 
     match wallet.network.as_str() {
         "mainnet" => {
-            {
-                let _sync_guard = LIGHTWALLETD_SYNC_LOCK.lock().await;
-                sync_wallet_for_network(MAIN_NETWORK, &app, wallet, &seed, &endpoint).await?;
-            }
+            sync_wallet_for_network(MAIN_NETWORK, &app, wallet, &seed, &endpoint).await?;
             let data_db_path = wallet_data_db_path(&app, &wallet.wallet_fingerprint)?;
             let mut db_data = WalletDb::for_path(&data_db_path, MAIN_NETWORK, SystemClock, rand::rngs::OsRng)
                 .map_err(|e| format!("wallet db open failed: {}", e))?;
@@ -1815,24 +1860,53 @@ async fn execute_transfer(app: tauri::AppHandle, proposal_json: String) -> Resul
                 .first()
                 .copied()
                 .ok_or_else(|| "No wallet account is initialized.".to_string())?;
+            let account = db_data
+                .get_account(account_id)
+                .map_err(|e| format!("wallet account lookup failed: {}", e))?
+                .ok_or_else(|| "Wallet account metadata is missing.".to_string())?;
+            let account_index = match account.source() {
+                AccountSource::Derived { derivation, .. } => derivation.account_index(),
+                AccountSource::Imported { .. } => {
+                    return Err("This wallet account is watch-only/imported and cannot send.".to_string())
+                }
+            };
             let to = zcash_keys::address::Address::decode(&MAIN_NETWORK, proposal.to.trim())
                 .ok_or_else(|| "Invalid recipient address.".to_string())?;
             let amount =
                 Zatoshis::from_u64(proposal.amount_zat).map_err(|e| format!("invalid amount: {}", e))?;
-            let tx_proposal = propose_standard_transfer_to_address::<_, _, std::convert::Infallible>(
+            let tx_proposal = match propose_standard_transfer_to_address::<_, _, std::convert::Infallible>(
                 &mut db_data,
                 &MAIN_NETWORK,
                 StandardFeeRule::Zip317,
                 account_id,
-                ConfirmationsPolicy::default(),
+                // Match balance/read UX: allow spendability of recently detected funds when possible.
+                ConfirmationsPolicy::MIN,
                 &to,
                 amount,
                 memo_bytes,
                 None,
                 ShieldedProtocol::Orchard,
-            )
-            .map_err(|e| format!("transfer proposal failed: {}", e))?;
-            let usk = UnifiedSpendingKey::from_seed(&MAIN_NETWORK, &seed, AccountId::ZERO)
+            ) {
+                Ok(p) => p,
+                Err(e) => {
+                    let e_str = e.to_string();
+                    if e_str.to_lowercase().contains("insufficient") && !wallet.transparent_address.trim().is_empty() {
+                        if let Ok(tb) =
+                            fetch_transparent_balance_fallback(&selected_endpoint, wallet.transparent_address.trim())
+                                .await
+                        {
+                            if tb > 0 {
+                                return Err(format!(
+                                    "transfer proposal failed: Insufficient spendable balance in synced wallet state, but transparent address reports {} zatoshis. Funds may still be pending confirmation or not yet spendable in local wallet state.",
+                                    tb
+                                ));
+                            }
+                        }
+                    }
+                    return Err(format!("transfer proposal failed: {}", e));
+                }
+            };
+            let usk = UnifiedSpendingKey::from_seed(&MAIN_NETWORK, &seed, account_index)
                 .map_err(|e| format!("spending key derivation failed: {}", e))?;
             let prover = LocalTxProver::bundled();
             let txids = create_proposed_transactions::<
@@ -1860,7 +1934,6 @@ async fn execute_transfer(app: tauri::AppHandle, proposal_json: String) -> Resul
             let mut raw_tx = Vec::new();
             tx.write(&mut raw_tx)
                 .map_err(|e| format!("transaction serialization failed: {}", e))?;
-            let selected_endpoint = select_lightwalletd_endpoint(&endpoint_candidates).await?;
             let mut client = CompactTxStreamerClient::connect(selected_endpoint)
                 .await
                 .map_err(|e| format!("lightwalletd connect failed: {}", e))?;
@@ -1875,13 +1948,16 @@ async fn execute_transfer(app: tauri::AppHandle, proposal_json: String) -> Resul
             if send_resp.error_code != 0 {
                 return Err(format!("broadcast rejected: {}", send_resp.error_message));
             }
-            Ok(hex_encode(txid.as_ref()))
+            log::info!(
+                "execute_transfer broadcasted: wallet={} network={} txid={}",
+                wallet.wallet_fingerprint,
+                wallet.network,
+                txid
+            );
+            Ok(txid.to_string())
         }
         "testnet" => {
-            {
-                let _sync_guard = LIGHTWALLETD_SYNC_LOCK.lock().await;
-                sync_wallet_for_network(TEST_NETWORK, &app, wallet, &seed, &endpoint).await?;
-            }
+            sync_wallet_for_network(TEST_NETWORK, &app, wallet, &seed, &endpoint).await?;
             let data_db_path = wallet_data_db_path(&app, &wallet.wallet_fingerprint)?;
             let mut db_data = WalletDb::for_path(&data_db_path, TEST_NETWORK, SystemClock, rand::rngs::OsRng)
                 .map_err(|e| format!("wallet db open failed: {}", e))?;
@@ -1891,24 +1967,53 @@ async fn execute_transfer(app: tauri::AppHandle, proposal_json: String) -> Resul
                 .first()
                 .copied()
                 .ok_or_else(|| "No wallet account is initialized.".to_string())?;
+            let account = db_data
+                .get_account(account_id)
+                .map_err(|e| format!("wallet account lookup failed: {}", e))?
+                .ok_or_else(|| "Wallet account metadata is missing.".to_string())?;
+            let account_index = match account.source() {
+                AccountSource::Derived { derivation, .. } => derivation.account_index(),
+                AccountSource::Imported { .. } => {
+                    return Err("This wallet account is watch-only/imported and cannot send.".to_string())
+                }
+            };
             let to = zcash_keys::address::Address::decode(&TEST_NETWORK, proposal.to.trim())
                 .ok_or_else(|| "Invalid recipient address.".to_string())?;
             let amount =
                 Zatoshis::from_u64(proposal.amount_zat).map_err(|e| format!("invalid amount: {}", e))?;
-            let tx_proposal = propose_standard_transfer_to_address::<_, _, std::convert::Infallible>(
+            let tx_proposal = match propose_standard_transfer_to_address::<_, _, std::convert::Infallible>(
                 &mut db_data,
                 &TEST_NETWORK,
                 StandardFeeRule::Zip317,
                 account_id,
-                ConfirmationsPolicy::default(),
+                // Match balance/read UX: allow spendability of recently detected funds when possible.
+                ConfirmationsPolicy::MIN,
                 &to,
                 amount,
                 memo_bytes,
                 None,
                 ShieldedProtocol::Orchard,
-            )
-            .map_err(|e| format!("transfer proposal failed: {}", e))?;
-            let usk = UnifiedSpendingKey::from_seed(&TEST_NETWORK, &seed, AccountId::ZERO)
+            ) {
+                Ok(p) => p,
+                Err(e) => {
+                    let e_str = e.to_string();
+                    if e_str.to_lowercase().contains("insufficient") && !wallet.transparent_address.trim().is_empty() {
+                        if let Ok(tb) =
+                            fetch_transparent_balance_fallback(&selected_endpoint, wallet.transparent_address.trim())
+                                .await
+                        {
+                            if tb > 0 {
+                                return Err(format!(
+                                    "transfer proposal failed: Insufficient spendable balance in synced wallet state, but transparent address reports {} zatoshis. Funds may still be pending confirmation or not yet spendable in local wallet state.",
+                                    tb
+                                ));
+                            }
+                        }
+                    }
+                    return Err(format!("transfer proposal failed: {}", e));
+                }
+            };
+            let usk = UnifiedSpendingKey::from_seed(&TEST_NETWORK, &seed, account_index)
                 .map_err(|e| format!("spending key derivation failed: {}", e))?;
             let prover = LocalTxProver::bundled();
             let txids = create_proposed_transactions::<
@@ -1936,7 +2041,6 @@ async fn execute_transfer(app: tauri::AppHandle, proposal_json: String) -> Resul
             let mut raw_tx = Vec::new();
             tx.write(&mut raw_tx)
                 .map_err(|e| format!("transaction serialization failed: {}", e))?;
-            let selected_endpoint = select_lightwalletd_endpoint(&endpoint_candidates).await?;
             let mut client = CompactTxStreamerClient::connect(selected_endpoint)
                 .await
                 .map_err(|e| format!("lightwalletd connect failed: {}", e))?;
@@ -1951,7 +2055,13 @@ async fn execute_transfer(app: tauri::AppHandle, proposal_json: String) -> Resul
             if send_resp.error_code != 0 {
                 return Err(format!("broadcast rejected: {}", send_resp.error_message));
             }
-            Ok(hex_encode(txid.as_ref()))
+            log::info!(
+                "execute_transfer broadcasted: wallet={} network={} txid={}",
+                wallet.wallet_fingerprint,
+                wallet.network,
+                txid
+            );
+            Ok(txid.to_string())
         }
         _ => Err("Unsupported network. Use mainnet or testnet.".to_string()),
     }
@@ -2065,11 +2175,70 @@ fn get_transactions(app: tauri::AppHandle, limit: u32) -> Result<Vec<TxInfo>, St
     let path = wallet_store_file(&app)?;
     let store = read_wallet_store(&path)?;
     ensure_app_unlocked(&app, &store)?;
-    if active_wallet(&store).is_none() {
-        return Err("Wallet is not initialized.".to_string());
+    let wallet = active_wallet(&store).ok_or_else(|| "Wallet is not initialized.".to_string())?;
+    let data_db_path = wallet_data_db_path(&app, &wallet.wallet_fingerprint)?;
+    if !data_db_path.exists() {
+        return Ok(Vec::new());
     }
-    let _ = limit;
-    Ok(Vec::new())
+    let conn = rusqlite::Connection::open(&data_db_path)
+        .map_err(|e| format!("wallet db open failed: {}", e))?;
+    let query = "
+        SELECT
+            txid,
+            account_balance_delta,
+            COALESCE(block_time, 0) AS block_time,
+            COALESCE(mined_height, 0) AS mined_height,
+            COALESCE(memo_count, 0) AS memo_count
+        FROM v_transactions
+        ORDER BY COALESCE(mined_height, 0) DESC, COALESCE(tx_index, 0) DESC
+        LIMIT ?1
+    ";
+    let mut stmt = conn
+        .prepare_cached(query)
+        .map_err(|e| format!("transaction query prepare failed: {}", e))?;
+    let tx_limit = i64::from(limit.max(1).min(500));
+    let rows = stmt
+        .query_map(params![tx_limit], |row| {
+            let txid_bytes: Vec<u8> = row.get(0)?;
+            let value_zat: i64 = row.get(1)?;
+            let block_time: i64 = row.get(2)?;
+            let mined_height: i64 = row.get(3)?;
+            let memo_count: i64 = row.get(4)?;
+            let txid = if txid_bytes.len() == 32 {
+                let mut raw = [0u8; 32];
+                raw.copy_from_slice(&txid_bytes);
+                TxId::from_bytes(raw).to_string()
+            } else {
+                // Defensive fallback for unexpected DB encodings.
+                hex_encode(&txid_bytes)
+            };
+            Ok(TxInfo {
+                txid,
+                value_zat,
+                timestamp: if block_time > 0 {
+                    block_time as u64
+                } else {
+                    now_unix_ts() as u64
+                },
+                block_height: if mined_height > 0 {
+                    (mined_height.min(i64::from(u32::MAX))) as u32
+                } else {
+                    0
+                },
+                memo: if memo_count > 0 {
+                    Some(format!("{} memo(s)", memo_count))
+                } else {
+                    None
+                },
+                is_incoming: value_zat >= 0,
+            })
+        })
+        .map_err(|e| format!("transaction query failed: {}", e))?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row.map_err(|e| format!("transaction row decode failed: {}", e))?);
+    }
+    Ok(out)
 }
 
 #[tauri::command]
@@ -2094,14 +2263,11 @@ async fn get_latest_block_height(app: tauri::AppHandle) -> Result<u32, String> {
 #[tauri::command]
 fn set_lightwalletd_server(app: tauri::AppHandle, url: String) -> Result<bool, String> {
     let normalized = normalize_grpc_endpoint(&url);
-    if normalized != FORCED_LIGHTWALLETD_ENDPOINT {
-        return Err(format!(
-            "Only {} is allowed in this build.",
-            FORCED_LIGHTWALLETD_ENDPOINT
-        ));
+    if !(normalized.starts_with("http://") || normalized.starts_with("https://")) {
+        return Err("Invalid lightwalletd URL. Expected http(s) endpoint.".to_string());
     }
     let cfg_path = lightwalletd_file(&app)?;
-    let data = serde_json::json!({ "url": FORCED_LIGHTWALLETD_ENDPOINT });
+    let data = serde_json::json!({ "url": normalized });
     let bytes =
         serde_json::to_vec_pretty(&data).map_err(|e| format!("config serialize failed: {}", e))?;
     fs::write(cfg_path, bytes).map_err(|e| format!("config write failed: {}", e))?;
@@ -2114,6 +2280,7 @@ pub fn run() {
         .plugin(tauri_plugin_store::Builder::new().build())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
+        .plugin(tauri_plugin_opener::init())
         .plugin(
             tauri_plugin_log::Builder::new()
                 .level(log::LevelFilter::Info)
