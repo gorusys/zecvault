@@ -164,7 +164,7 @@ export function Dashboard() {
         </div>
         {expertAddressMode && (orchardZat > 0 || saplingZat > 0 || transparentZat > 0 || totalZat > 0) && (
           <div style={{ marginTop: 16, paddingTop: 16, borderTop: "1px solid var(--gray-100)", textAlign: "left" }}>
-            <div className="t-label" style={{ marginBottom: 8 }}>Spendable by pool (synced)</div>
+            {/* <div className="t-label" style={{ marginBottom: 8 }}>Spendable by pool (synced)</div> */}
             <div className="hstack gap-10" style={{ flexWrap: "wrap" }}>
               <span className="t-caption text-gray-600">
                 Orchard: <span className="t-mono">{fmtZec(orchardZat)}</span>
@@ -176,9 +176,9 @@ export function Dashboard() {
                 Transparent: <span className="t-mono">{fmtZec(transparentZat)}</span>
               </span>
             </div>
-            <p className="t-caption text-gray-400" style={{ marginTop: 8, marginBottom: 0 }}>
+            {/* <p className="t-caption text-gray-400" style={{ marginTop: 8, marginBottom: 0 }}>
               Cross-pool sends combine pools when the wallet can build a valid ZIP 317 proposal. If one pool is short, try a smaller amount or move value between pools with an intermediate send to yourself.
-            </p>
+            </p> */}
           </div>
         )}
       </div>

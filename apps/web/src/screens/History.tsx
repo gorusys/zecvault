@@ -1,4 +1,5 @@
 import { useMemo, useState } from "react";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { useWalletStore, useVaultStore } from "@/stores";
 import { fmtZec, formatRelativeTime, truncateAddress } from "@/lib/zec";
 import { categoryOf } from "@/lib/categories";
@@ -15,6 +16,7 @@ export function History() {
   const activeWalletKey = activeWalletFingerprint || fallbackWalletFingerprint;
   const [tab, setTab] = useState<typeof TABS[number]>("All");
   const [q, setQ] = useState("");
+  const [expandedTx, setExpandedTx] = useState<string | null>(null);
 
   const filtered = useMemo(() => txHistory.filter((tx) => {
     if (tx.walletFingerprint && tx.walletFingerprint !== activeWalletKey) return false;
@@ -28,6 +30,14 @@ export function History() {
     }
     return true;
   }), [txHistory, tab, q, activeWalletKey]);
+
+  const openExternalLink = async (url: string) => {
+    try {
+      await openUrl(url);
+    } catch {
+      window.open(url, "_blank", "noopener,noreferrer");
+    }
+  };
 
   return (
     <div className="fade-in">
@@ -55,19 +65,74 @@ export function History() {
         ) : filtered.map((tx) => {
           const isReceived = tx.type === "received";
           const isVault = tx.type.startsWith("vault");
+          const isNativeTx = tx.id.startsWith("native:");
           const vault = isVault ? [...vaults, ...archive].find((v) => v.id === tx.vaultId) : null;
           const cat = vault ? categoryOf(vault.category) : null;
           const color = isReceived ? "var(--success-strong)" : isVault ? "#4FA3E3" : "var(--coral-400)";
+          const txid = isNativeTx ? tx.id.slice("native:".length) : "";
+          const isExpanded = expandedTx === tx.id;
           return (
-            <div key={tx.id} className="hstack gap-12" style={{ padding: "10px 20px", height: 52, borderBottom: "1px solid var(--gray-100)" }}>
-              <div style={{ width: 32, height: 32, borderRadius: 999, background: isReceived ? "var(--success-bg)" : isVault ? `var(--vault-${vault!.category})` : "var(--coral-100)", display: "grid", placeItems: "center", color }}>
-                <Icon name={isVault ? "lock" : isReceived ? "arrow-down-left" : "arrow-up-right"} size={14} />
-              </div>
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <div className="t-body-med">{isVault ? `Vault: ${vault?.goalName ?? ""}` : isReceived ? "Received" : "Sent"} {cat && <span className="pill cat-tint" style={{ marginLeft: 6 }}>{cat.emoji} {cat.name}</span>}</div>
-                <div className="t-caption text-gray-400">{tx.toAddress ? truncateAddress(tx.toAddress) : "shielded"} • {formatRelativeTime(tx.timestamp)}</div>
-              </div>
-              <div className="t-mono-lg tabular" style={{ color, fontWeight: 600 }}>{tx.amountZat > 0 ? "+" : "−"}{fmtZec(Math.abs(tx.amountZat))}</div>
+            <div key={tx.id} style={{ borderBottom: "1px solid var(--gray-100)" }}>
+              <button
+                type="button"
+                className="hstack gap-12"
+                onClick={() => setExpandedTx(isExpanded ? null : tx.id)}
+                style={{ width: "100%", padding: "10px 20px", minHeight: 52, border: 0, background: "transparent", cursor: "pointer" }}
+              >
+                <div style={{ width: 32, height: 32, borderRadius: 999, background: isReceived ? "var(--success-bg)" : isVault ? `var(--vault-${vault?.category ?? "travel"})` : "var(--coral-100)", display: "grid", placeItems: "center", color }}>
+                  <Icon name={isVault ? "lock" : isReceived ? "arrow-down-left" : "arrow-up-right"} size={14} />
+                </div>
+                <div style={{ flex: 1, minWidth: 0, textAlign: "left" }}>
+                  <div className="t-body-med">
+                    {isVault ? `Vault: ${vault?.goalName ?? ""}` : isReceived ? "Received" : "Sent"}
+                    {cat && <span className="pill cat-tint" style={{ marginLeft: 6 }}>{cat.emoji} {cat.name}</span>}
+                    {isNativeTx && tx.blockHeight > 0 && <span className="pill" style={{ marginLeft: 6 }}>Mined</span>}
+                    {isNativeTx && tx.blockHeight === 0 && <span className="pill" style={{ marginLeft: 6 }}>Pending</span>}
+                  </div>
+                  <div className="t-caption text-gray-400">
+                    {(tx.toAddress || tx.fromAddress) ? truncateAddress(tx.toAddress || tx.fromAddress || "") : "shielded"}
+                    {" • "}
+                    {formatRelativeTime(tx.timestamp)}
+                  </div>
+                </div>
+                <div className="t-mono-lg tabular" style={{ color, fontWeight: 600 }}>{tx.amountZat > 0 ? "+" : "−"}{fmtZec(Math.abs(tx.amountZat))}</div>
+              </button>
+              {isExpanded && (
+                <div style={{ padding: "0 20px 12px 64px" }}>
+                  {tx.memo && (
+                    <div className="t-caption text-gray-600" style={{ marginBottom: 8 }}>
+                      Memo: {tx.memo}
+                    </div>
+                  )}
+                  {isNativeTx && txid && (
+                    <div className="hstack gap-8" style={{ flexWrap: "wrap" }}>
+                      <button
+                        type="button"
+                        className="btn btn-secondary"
+                        style={{ height: 30, padding: "0 10px" }}
+                        onClick={() => {
+                          void navigator.clipboard?.writeText(txid);
+                        }}
+                      >
+                        Copy TxID
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btn-primary"
+                        style={{ height: 30, padding: "0 10px" }}
+                        onClick={() => void openExternalLink(`https://cipherscan.app/tx/${txid}`)}
+                      >
+                        Open in CipherScan
+                      </button>
+                      {tx.blockHeight > 0 && (
+                        <span className="t-caption text-gray-500" style={{ alignSelf: "center" }}>
+                          Block {tx.blockHeight.toLocaleString()}
+                        </span>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
           );
         })}

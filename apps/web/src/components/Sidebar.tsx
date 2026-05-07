@@ -1,6 +1,7 @@
 import { Link, useRouterState } from "@tanstack/react-router";
 import { useEffect, useRef } from "react";
 import { Icon, type IconName } from "./Icon";
+import type { TxRecord } from "@/stores";
 import { useSettings, useVaultStore, useWalletStore } from "@/stores";
 import { useWallet } from "@/hooks/useWallet";
 
@@ -18,6 +19,7 @@ export function Sidebar() {
   const setSyncStatus = useWalletStore((s) => s.setSyncStatus);
   const setSyncMetrics = useWalletStore((s) => s.setSyncMetrics);
   const setBalances = useWalletStore((s) => s.setBalances);
+  const setNativeTxHistory = useWalletStore((s) => s.setNativeTxHistory);
   const applyWalletSnapshot = useWalletStore((s) => s.applyWalletSnapshot);
   const setMarketData = useWalletStore((s) => s.setMarketData);
   const walletApi = useWallet();
@@ -25,6 +27,7 @@ export function Sidebar() {
   const syncCooldownUntilRef = useRef(0);
   const syncFailureCountRef = useRef(0);
   const retryTimerRef = useRef<number | null>(null);
+  const lastAutoSyncAtRef = useRef(0);
   const activeVaultCount = vaults.filter(
     (v) => (v.walletFingerprint || (activeWalletFingerprint || fallbackWalletFingerprint)) === (activeWalletFingerprint || fallbackWalletFingerprint),
   ).length;
@@ -86,6 +89,28 @@ export function Sidebar() {
       }
     };
 
+    const refreshTransactions = async () => {
+      try {
+        const state = useWalletStore.getState();
+        const walletKey = state.activeWalletFingerprint || state.walletFingerprint;
+        if (!walletKey) return;
+        const txs = await walletApi.getTransactions(200);
+        const nativeTxs: TxRecord[] = txs.map((tx) => ({
+          id: `native:${tx.txid}`,
+          type: tx.isIncoming ? "received" : "sent",
+          amountZat: tx.valueZat,
+          walletFingerprint: walletKey,
+          memo: tx.memo,
+          blockHeight: tx.blockHeight,
+          feeZat: 0,
+          timestamp: tx.timestamp > 1_000_000_000_000 ? tx.timestamp : tx.timestamp * 1000,
+        }));
+        setNativeTxHistory(nativeTxs);
+      } catch (e) {
+        console.warn("[zecvault] getTransactions failed", e);
+      }
+    };
+
     const refreshBalanceWithReconcile = async () => {
       try {
         try {
@@ -97,6 +122,7 @@ export function Sidebar() {
           console.warn("[zecvault] reconcileDerivedAddresses failed", e);
         }
         await refreshBalanceLight();
+        await refreshTransactions();
       } catch (e) {
         console.warn("[zecvault] refreshBalanceWithReconcile failed", e);
       }
@@ -136,6 +162,12 @@ export function Sidebar() {
           const currentProgress = useWalletStore.getState().syncProgress;
           setSyncMetrics({ syncProgress: currentProgress, syncBlock: Math.max(current, latestTip) });
           console.info("[zecvault][tip] latest=%d previous=%d", latestTip, current);
+          const now = Date.now();
+          // Trigger a faster incremental sync when chain advances, but throttle to avoid storms.
+          if (!syncInFlight.current && now - lastAutoSyncAtRef.current > 20_000) {
+            lastAutoSyncAtRef.current = now;
+            void startSyncCycle();
+          }
         }
       } catch (e) {
         console.warn("[zecvault] getLatestBlockHeight failed", e);
@@ -186,6 +218,7 @@ export function Sidebar() {
             setSyncStatus("synced");
             console.info("[zecvault][sync] complete");
             void refreshBalanceWithReconcile();
+            void refreshTransactions();
           },
         );
       } catch (e) {
@@ -203,17 +236,18 @@ export function Sidebar() {
     };
 
     void refreshBalanceWithReconcile();
+    void refreshTransactions();
     void startSyncCycle();
     void refreshChainTip();
     void refreshMarketPrice();
     const balancePoll = setInterval(() => {
       if (stopped) return;
       void refreshBalanceLight();
-    }, 30_000);
+    }, 10_000);
     const chainResync = setInterval(() => {
       if (stopped) return;
       void startSyncCycle();
-    }, 5 * 60_000);
+    }, 90_000);
     const tipPoll = setInterval(() => {
       if (stopped) return;
       void refreshChainTip();
@@ -222,6 +256,10 @@ export function Sidebar() {
       if (stopped) return;
       void refreshMarketPrice();
     }, 60_000);
+    const txPoll = setInterval(() => {
+      if (stopped) return;
+      void refreshTransactions();
+    }, 20_000);
 
     return () => {
       stopped = true;
@@ -233,9 +271,10 @@ export function Sidebar() {
       clearInterval(chainResync);
       clearInterval(tipPoll);
       clearInterval(priceTimer);
+      clearInterval(txPoll);
       dispose();
     };
-  }, [applyWalletSnapshot, setBalances, setMarketData, setSyncMetrics, setSyncStatus, walletApi]);
+  }, [applyWalletSnapshot, setBalances, setMarketData, setNativeTxHistory, setSyncMetrics, setSyncStatus, walletApi]);
 
   return (
     <aside className="sidebar">

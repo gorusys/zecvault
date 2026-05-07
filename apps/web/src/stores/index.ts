@@ -88,6 +88,7 @@ interface WalletState {
   createWalletFromMnemonic: (mnemonic: string, network: "mainnet" | "testnet") => void;
   restoreWalletFromMnemonic: (mnemonic: string, network: "mainnet" | "testnet") => { ok: boolean; error?: string };
   addTx: (tx: TxRecord) => void;
+  setNativeTxHistory: (txs: TxRecord[]) => void;
   setSyncStatus: (s: SyncStatus) => void;
   setSyncMetrics: (input: { syncProgress: number; syncBlock: number }) => void;
   setBalances: (input: {
@@ -273,6 +274,11 @@ export const useWalletStore = create<WalletState>()(
         return { ok: true };
       },
       addTx: (tx) => set({ txHistory: [tx, ...get().txHistory] }),
+      setNativeTxHistory: (txs) => set((state) => {
+        const custom = state.txHistory.filter((tx) => !tx.id.startsWith("native:"));
+        const merged = [...txs, ...custom].sort((a, b) => b.timestamp - a.timestamp);
+        return { txHistory: merged };
+      }),
       setSyncStatus: (s) => set({ syncStatus: s }),
       setSyncMetrics: ({ syncProgress, syncBlock }) => set({
         syncProgress,
