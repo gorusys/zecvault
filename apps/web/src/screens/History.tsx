@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useMemo, useState, type CSSProperties, type ReactNode } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useWalletStore, useVaultStore } from "@/stores";
 import { fmtZec, formatRelativeTime, truncateAddress } from "@/lib/zec";
@@ -6,6 +6,86 @@ import { categoryOf } from "@/lib/categories";
 import { Icon } from "@/components/Icon";
 
 const TABS = ["All", "Vaults", "Received", "Sent", "Memos"] as const;
+
+const wrapMono: CSSProperties = {
+  overflowWrap: "anywhere",
+  wordBreak: "break-word",
+  fontFamily: "var(--font-mono, DM Mono, ui-monospace, monospace)",
+  fontSize: "0.85rem",
+};
+
+async function copyText(text: string) {
+  try {
+    await navigator.clipboard?.writeText(text);
+  } catch {
+    /* ignore */
+  }
+}
+
+function IconGhostBtn({
+  label,
+  onClick,
+  children,
+}: {
+  label: string;
+  onClick: () => void;
+  children: ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      className="btn btn-ghost"
+      aria-label={label}
+      title={label}
+      onClick={onClick}
+      style={{
+        height: 28,
+        width: 28,
+        padding: 0,
+        display: "inline-grid",
+        placeItems: "center",
+        flexShrink: 0,
+        color: "var(--gray-500)",
+      }}
+    >
+      {children}
+    </button>
+  );
+}
+
+function DetailRow({
+  label,
+  value,
+  copyable,
+}: {
+  label: string;
+  value: string | undefined | null;
+  copyable?: boolean;
+}) {
+  const text = (value ?? "").trim();
+  const show = text.length > 0;
+  return (
+    <div style={{ display: "flex", gap: 8, alignItems: "flex-start" }}>
+      <span className="text-gray-500" style={{ flexShrink: 0, minWidth: 72 }}>
+        {label}
+      </span>
+      <div style={{ flex: 1, minWidth: 0 }}>
+        {show ? (
+          <span className="t-mono" style={wrapMono}>
+            {text}
+          </span>
+        ) : (
+          <span className="t-caption text-gray-400">—</span>
+        )}
+      </div>
+      {copyable && show ? (
+        <IconGhostBtn label={`Copy ${label}`} onClick={() => void copyText(text)}>
+          <Icon name="copy" size={14} />
+        </IconGhostBtn>
+      ) : null}
+    </div>
+  );
+}
 
 export function History() {
   const txHistory = useWalletStore((s) => s.txHistory);
@@ -26,7 +106,12 @@ export function History() {
     if (tab === "Memos" && !tx.memo) return false;
     if (q) {
       const s = q.toLowerCase();
-      return (tx.toAddress?.toLowerCase().includes(s) || tx.memo?.toLowerCase().includes(s) || fmtZec(Math.abs(tx.amountZat)).includes(s));
+      return (
+        tx.fromAddress?.toLowerCase().includes(s)
+        || tx.toAddress?.toLowerCase().includes(s)
+        || tx.memo?.toLowerCase().includes(s)
+        || fmtZec(Math.abs(tx.amountZat)).includes(s)
+      );
     }
     return true;
   }), [txHistory, tab, q, activeWalletKey]);
@@ -54,7 +139,6 @@ export function History() {
       </div>
 
       <div style={{ position: "relative", marginBottom: 16 }}>
-        <Icon name="search" size={16} />
         <input className="input" placeholder="Search by address, memo, or amount…" value={q} onChange={(e) => setQ(e.target.value)} style={{ paddingLeft: 36, height: 36 }} />
         <span style={{ position: "absolute", left: 12, top: 10, color: "var(--gray-400)" }}><Icon name="search" size={16} /></span>
       </div>
@@ -98,37 +182,62 @@ export function History() {
                 <div className="t-mono-lg tabular" style={{ color, fontWeight: 600 }}>{tx.amountZat > 0 ? "+" : "−"}{fmtZec(Math.abs(tx.amountZat))}</div>
               </button>
               {isExpanded && (
-                <div style={{ padding: "0 20px 12px 64px" }}>
+                <div style={{ padding: "0 20px 16px 64px", maxWidth: "100%" }}>
+                  <div
+                    className="t-caption text-gray-600"
+                    style={{
+                      marginBottom: 12,
+                      display: "flex",
+                      flexDirection: "column",
+                      gap: 10,
+                    }}
+                  >
+                    {isNativeTx && isReceived && !tx.fromAddress?.trim() && (
+                      <div className="t-caption text-gray-400" style={{ ...wrapMono }}>
+                        Incoming shielded transfers do not reveal the sender&apos;s address on-chain.
+                      </div>
+                    )}
+                    <DetailRow label="From" value={tx.fromAddress} copyable />
+                    <DetailRow label="To" value={tx.toAddress} copyable />
+                    <div style={{ display: "flex", gap: 8, alignItems: "flex-start", flexWrap: "wrap" }}>
+                      <span className="text-gray-500" style={{ flexShrink: 0, minWidth: 72 }}>Amount</span>
+                      <span className="t-mono" style={{ ...wrapMono, flex: 1 }}>
+                        {tx.amountZat > 0 ? "+" : "−"}
+                        {fmtZec(Math.abs(tx.amountZat))}
+                      </span>
+                    </div>
+                    {isNativeTx && (
+                      <div style={{ display: "flex", gap: 8, alignItems: "flex-start", flexWrap: "wrap" }}>
+                        <span className="text-gray-500" style={{ flexShrink: 0, minWidth: 72 }}>Fee</span>
+                        <span className="t-mono" style={wrapMono}>{fmtZec(Math.max(0, tx.feeZat || 0))}</span>
+                      </div>
+                    )}
+                    {isNativeTx && tx.blockHeight > 0 && (
+                      <div style={{ display: "flex", gap: 8, alignItems: "flex-start", flexWrap: "wrap" }}>
+                        <span className="text-gray-500" style={{ flexShrink: 0, minWidth: 72 }}>Block</span>
+                        <span className="t-mono" style={wrapMono}>{tx.blockHeight.toLocaleString()}</span>
+                      </div>
+                    )}
+                    <div style={{ display: "flex", gap: 8, alignItems: "flex-start", flexWrap: "wrap" }}>
+                      <span className="text-gray-500" style={{ flexShrink: 0, minWidth: 72 }}>Time</span>
+                      <span className="t-mono" style={wrapMono}>{new Date(tx.timestamp).toLocaleString()}</span>
+                    </div>
+                  </div>
                   {tx.memo && (
-                    <div className="t-caption text-gray-600" style={{ marginBottom: 8 }}>
+                    <div className="t-caption text-gray-600" style={{ marginBottom: 12, overflowWrap: "anywhere", wordBreak: "break-word" }}>
                       Memo: {tx.memo}
                     </div>
                   )}
                   {isNativeTx && txid && (
-                    <div className="hstack gap-8" style={{ flexWrap: "wrap" }}>
-                      <button
-                        type="button"
-                        className="btn btn-secondary"
-                        style={{ height: 30, padding: "0 10px" }}
-                        onClick={() => {
-                          void navigator.clipboard?.writeText(txid);
-                        }}
-                      >
-                        Copy TxID
-                      </button>
-                      <button
-                        type="button"
-                        className="btn btn-primary"
-                        style={{ height: 30, padding: "0 10px" }}
-                        onClick={() => void openExternalLink(`https://cipherscan.app/tx/${txid}`)}
-                      >
-                        Open in CipherScan
-                      </button>
-                      {tx.blockHeight > 0 && (
-                        <span className="t-caption text-gray-500" style={{ alignSelf: "center" }}>
-                          Block {tx.blockHeight.toLocaleString()}
-                        </span>
-                      )}
+                    <div style={{ display: "flex", gap: 8, alignItems: "flex-start", flexWrap: "wrap" }}>
+                      <span className="text-gray-500" style={{ flexShrink: 0, minWidth: 72 }}>Tx ID</span>
+                      <span className="t-mono" style={{ ...wrapMono, flex: 1 }}>{txid}</span>
+                      <IconGhostBtn label="Copy transaction id" onClick={() => void copyText(txid)}>
+                        <Icon name="copy" size={14} />
+                      </IconGhostBtn>
+                      <IconGhostBtn label="Open in CipherScan" onClick={() => void openExternalLink(`https://cipherscan.app/tx/${txid}`)}>
+                        <Icon name="external-link" size={14} />
+                      </IconGhostBtn>
                     </div>
                   )}
                 </div>
