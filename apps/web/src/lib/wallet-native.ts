@@ -43,6 +43,7 @@ export interface NativeWalletListResponse {
 export interface NativeAppLockState {
   configured: boolean;
   locked: boolean;
+  hasWallets?: boolean;
 }
 
 export interface NativeWalletBackupExport {
