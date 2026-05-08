@@ -102,7 +102,9 @@ export function Sidebar() {
           walletFingerprint: walletKey,
           memo: tx.memo,
           blockHeight: tx.blockHeight,
-          feeZat: 0,
+          feeZat: tx.feeZat ?? 0,
+          toAddress: tx.toAddress,
+          fromAddress: tx.fromAddress,
           timestamp: tx.timestamp > 1_000_000_000_000 ? tx.timestamp : tx.timestamp * 1000,
         }));
         setNativeTxHistory(nativeTxs);
@@ -130,6 +132,20 @@ export function Sidebar() {
 
     const refreshMarketPrice = async () => {
       try {
+        const isTauriRuntime = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+        if (isTauriRuntime) {
+          const { invoke } = await import("@tauri-apps/api/core");
+          const mp = await invoke<{ zecUsdPrice: number; priceChange24h: number }>("get_market_price");
+          if (typeof mp?.zecUsdPrice === "number" && Number.isFinite(mp.zecUsdPrice) && mp.zecUsdPrice > 0) {
+            setMarketData({
+              zecUsdPrice: mp.zecUsdPrice,
+              priceChange24h: typeof mp.priceChange24h === "number" && Number.isFinite(mp.priceChange24h) ? mp.priceChange24h : 0,
+            });
+            return;
+          }
+        }
+
+        // Web/dev fallback
         const res = await fetch(
           "https://api.coingecko.com/api/v3/simple/price?ids=zcash&vs_currencies=usd&include_24hr_change=true",
           { cache: "no-store" },

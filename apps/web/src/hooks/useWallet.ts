@@ -18,6 +18,9 @@ export interface TxInfo {
   valueZat: number;
   timestamp: number;
   blockHeight: number;
+  feeZat: number;
+  toAddress?: string;
+  fromAddress?: string;
   memo?: string;
   isIncoming: boolean;
 }

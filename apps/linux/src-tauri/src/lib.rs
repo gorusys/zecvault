@@ -142,6 +142,14 @@ struct WalletListResponse {
 struct AppLockStateResponse {
     configured: bool,
     locked: bool,
+    has_wallets: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct MarketPriceResponse {
+    zec_usd_price: f64,
+    price_change_24h: f64,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -176,6 +184,9 @@ struct TxInfo {
     value_zat: i64,
     timestamp: u64,
     block_height: u32,
+    fee_zat: i64,
+    to_address: Option<String>,
+    from_address: Option<String>,
     memo: Option<String>,
     is_incoming: bool,
 }
@@ -1520,6 +1531,7 @@ fn app_get_lock_state(app: tauri::AppHandle) -> Result<AppLockStateResponse, Str
     Ok(AppLockStateResponse {
         configured: is_app_password_configured(&store),
         locked: is_app_locked(&app, &store),
+        has_wallets: !store.wallets.is_empty(),
     })
 }
 
@@ -2182,15 +2194,40 @@ fn get_transactions(app: tauri::AppHandle, limit: u32) -> Result<Vec<TxInfo>, St
     }
     let conn = rusqlite::Connection::open(&data_db_path)
         .map_err(|e| format!("wallet db open failed: {}", e))?;
+    // `v_transactions` provides wallet-relative deltas and fee. We add best-effort counterparty
+    // address extraction:
+    // - For sends: first non-change `sent_notes.to_address`.
+    // - For receives: first non-change wallet receive address from `addresses`.
     let query = "
         SELECT
-            txid,
-            account_balance_delta,
-            COALESCE(block_time, 0) AS block_time,
-            COALESCE(mined_height, 0) AS mined_height,
-            COALESCE(memo_count, 0) AS memo_count
-        FROM v_transactions
-        ORDER BY COALESCE(mined_height, 0) DESC, COALESCE(tx_index, 0) DESC
+            v.txid,
+            v.account_balance_delta,
+            COALESCE(v.block_time, 0) AS block_time,
+            COALESCE(v.mined_height, 0) AS mined_height,
+            COALESCE(v.memo_count, 0) AS memo_count,
+            COALESCE(v.fee_paid, 0) AS fee_paid,
+            (
+                SELECT sn.to_address
+                FROM sent_notes sn
+                LEFT JOIN v_received_outputs ro ON ro.sent_note_id = sn.id
+                WHERE sn.transaction_id = t.id_tx
+                  AND COALESCE(ro.is_change, 0) = 0
+                  AND sn.to_address IS NOT NULL
+                  AND TRIM(sn.to_address) != ''
+                ORDER BY sn.value DESC
+                LIMIT 1
+            ) AS to_address,
+            (
+                SELECT COALESCE(a.address, a.cached_transparent_receiver_address)
+                FROM v_received_outputs ro
+                JOIN addresses a ON a.id = ro.address_id
+                WHERE ro.transaction_id = t.id_tx
+                  AND COALESCE(ro.is_change, 0) = 0
+                LIMIT 1
+            ) AS received_at
+        FROM v_transactions v
+        JOIN transactions t ON t.txid = v.txid
+        ORDER BY COALESCE(v.mined_height, 0) DESC, COALESCE(v.tx_index, 0) DESC
         LIMIT ?1
     ";
     let mut stmt = conn
@@ -2204,6 +2241,9 @@ fn get_transactions(app: tauri::AppHandle, limit: u32) -> Result<Vec<TxInfo>, St
             let block_time: i64 = row.get(2)?;
             let mined_height: i64 = row.get(3)?;
             let memo_count: i64 = row.get(4)?;
+            let fee_paid: i64 = row.get(5)?;
+            let to_address: Option<String> = row.get(6)?;
+            let received_at: Option<String> = row.get(7)?;
             let txid = if txid_bytes.len() == 32 {
                 let mut raw = [0u8; 32];
                 raw.copy_from_slice(&txid_bytes);
@@ -2211,6 +2251,18 @@ fn get_transactions(app: tauri::AppHandle, limit: u32) -> Result<Vec<TxInfo>, St
             } else {
                 // Defensive fallback for unexpected DB encodings.
                 hex_encode(&txid_bytes)
+            };
+            let is_incoming = value_zat >= 0;
+            let ua = wallet.unified_address.clone();
+            let to_addr = if is_incoming {
+                received_at.clone()
+            } else {
+                to_address.clone()
+            };
+            let from_addr = if is_incoming {
+                None
+            } else {
+                Some(ua)
             };
             Ok(TxInfo {
                 txid,
@@ -2225,12 +2277,15 @@ fn get_transactions(app: tauri::AppHandle, limit: u32) -> Result<Vec<TxInfo>, St
                 } else {
                     0
                 },
+                fee_zat: fee_paid,
+                to_address: to_addr,
+                from_address: from_addr,
                 memo: if memo_count > 0 {
                     Some(format!("{} memo(s)", memo_count))
                 } else {
                     None
                 },
-                is_incoming: value_zat >= 0,
+                is_incoming,
             })
         })
         .map_err(|e| format!("transaction query failed: {}", e))?;
@@ -2272,6 +2327,91 @@ fn set_lightwalletd_server(app: tauri::AppHandle, url: String) -> Result<bool, S
         serde_json::to_vec_pretty(&data).map_err(|e| format!("config serialize failed: {}", e))?;
     fs::write(cfg_path, bytes).map_err(|e| format!("config write failed: {}", e))?;
     Ok(true)
+}
+
+#[tauri::command]
+async fn get_market_price() -> Result<MarketPriceResponse, String> {
+    // Prefer native HTTP in production because some webviews/AppImages get blocked calling
+    // CoinGecko directly (CORS / UA / network policies).
+    #[derive(Deserialize)]
+    struct GeckoResp {
+        zcash: Option<GeckoZcash>,
+    }
+    #[derive(Deserialize)]
+    struct GeckoZcash {
+        usd: Option<f64>,
+        usd_24h_change: Option<f64>,
+    }
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(8))
+        .build()
+        .map_err(|e| format!("http client init failed: {}", e))?;
+
+    // 1) CoinGecko (primary)
+    if let Ok(resp) = client
+        .get("https://api.coingecko.com/api/v3/simple/price?ids=zcash&vs_currencies=usd&include_24hr_change=true")
+        .header("accept", "application/json")
+        .send()
+        .await
+    {
+        if resp.status().is_success() {
+            if let Ok(json) = resp.json::<GeckoResp>().await {
+                if let Some(z) = json.zcash {
+                    if let Some(usd) = z.usd.filter(|v| v.is_finite() && *v > 0.0) {
+                        return Ok(MarketPriceResponse {
+                            zec_usd_price: usd,
+                            price_change_24h: z.usd_24h_change.unwrap_or(0.0),
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    // 2) CoinPaprika (fallback)
+    #[derive(Deserialize)]
+    struct PaprikaResp {
+        quotes: Option<PaprikaQuotes>,
+    }
+    #[derive(Deserialize)]
+    struct PaprikaQuotes {
+        #[serde(rename = "USD")]
+        usd: Option<PaprikaUsd>,
+    }
+    #[derive(Deserialize)]
+    struct PaprikaUsd {
+        price: Option<f64>,
+        percent_change_24h: Option<f64>,
+    }
+
+    let resp = client
+        .get("https://api.coinpaprika.com/v1/tickers/zec-zcash")
+        .header("accept", "application/json")
+        .send()
+        .await
+        .map_err(|e| format!("price fetch failed: {}", e))?;
+
+    if !resp.status().is_success() {
+        return Err(format!("price fetch failed: http {}", resp.status()));
+    }
+    let json = resp
+        .json::<PaprikaResp>()
+        .await
+        .map_err(|e| format!("price parse failed: {}", e))?;
+    let usd_quote = json
+        .quotes
+        .and_then(|q| q.usd)
+        .ok_or_else(|| "price unavailable from providers".to_string())?;
+    let usd = usd_quote
+        .price
+        .filter(|v| v.is_finite() && *v > 0.0)
+        .ok_or_else(|| "price unavailable from providers".to_string())?;
+    let change = usd_quote.percent_change_24h.unwrap_or(0.0);
+    Ok(MarketPriceResponse {
+        zec_usd_price: usd,
+        price_change_24h: change,
+    })
 }
 
 pub fn run() {
@@ -2324,6 +2464,7 @@ pub fn run() {
             start_sync,
             get_transactions,
             get_latest_block_height,
+            get_market_price,
             set_lightwalletd_server
         ])
         .build(tauri::generate_context!())
