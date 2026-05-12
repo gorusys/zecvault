@@ -24,6 +24,7 @@ use zcash_client_backend::data_api::wallet::{
 use zcash_client_backend::data_api::chain::{BlockCache, BlockSource};
 use zcash_client_backend::data_api::{Account as WalletAccount, AccountBirthday, AccountSource, InputSource, WalletRead, WalletWrite};
 use zcash_client_backend::fees::StandardFeeRule;
+use tonic::transport::Channel;
 use zcash_client_backend::proto::compact_formats::CompactBlock;
 use zcash_client_backend::proto::service::{self, compact_tx_streamer_client::CompactTxStreamerClient};
 use zcash_client_backend::sync;
@@ -63,6 +64,14 @@ struct WalletRecord {
     #[serde(default)]
     wallet_name: String,
     wallet_fingerprint: String,
+    /// ZIP-32 account index. 0 for the first account (default); 1, 2, … for additional accounts
+    /// derived from the same seed phrase. Stored so syncing uses the correct derivation path.
+    #[serde(default)]
+    account_index: u32,
+    /// fingerprint of account-0 for this seed — identical across all accounts from the same seed,
+    /// so sibling accounts can be found without decrypting mnemonics.
+    #[serde(default)]
+    seed_fingerprint: String,
     unified_address: String,
     #[serde(default)]
     orchard_unified_address: String,
@@ -86,6 +95,10 @@ struct WalletSnapshot {
     network: String,
     wallet_name: String,
     wallet_fingerprint: String,
+    #[serde(default)]
+    account_index: u32,
+    #[serde(default)]
+    seed_fingerprint: String,
     unified_address: String,
     #[serde(default)]
     orchard_unified_address: String,
@@ -218,13 +231,26 @@ struct TransferProposalPayload {
 
 const DEFAULT_LIGHTWALLETD_ENDPOINT: &str = "http://88.99.165.25:9067";
 
-/// Blocks per `sync::run` download/scan step. The upstream default in sample code is often 100;
-/// values around 1k–2k cut lightwalletd round-trips dramatically for long historical scans.
-const LIGHTWALLETD_SYNC_BATCH_SIZE: u32 = 1_500;
+/// Blocks per `sync::run` download/scan step.
+/// 10,000 gives a ~7× reduction in lightwalletd round-trips vs 1,500 for historical syncs
+/// while keeping per-batch memory under ~5 MB (compact blocks average ~200–500 bytes each).
+const LIGHTWALLETD_SYNC_BATCH_SIZE: u32 = 10_000;
 
-#[derive(Default)]
 struct MemoryBlockCache {
     blocks: Mutex<Vec<CompactBlock>>,
+    /// Used to emit `sync-progress` events on every batch insert so the UI gets live updates.
+    app: tauri::AppHandle,
+    tip_height: u32,
+}
+
+impl MemoryBlockCache {
+    fn new(app: tauri::AppHandle, tip_height: u32) -> Self {
+        Self {
+            blocks: Mutex::new(Vec::new()),
+            app,
+            tip_height,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -312,13 +338,25 @@ impl BlockCache for MemoryBlockCache {
     }
 
     async fn insert(&self, mut compact_blocks: Vec<CompactBlock>) -> Result<(), Self::Error> {
-        let mut blocks = self
-            .blocks
-            .lock()
-            .map_err(|_| CacheError("block cache lock poisoned"))?;
-        blocks.append(&mut compact_blocks);
-        blocks.sort_by_key(|b| b.height);
-        blocks.dedup_by_key(|b| b.height);
+        let highest_height = {
+            let mut blocks = self
+                .blocks
+                .lock()
+                .map_err(|_| CacheError("block cache lock poisoned"))?;
+            blocks.append(&mut compact_blocks);
+            blocks.sort_by_key(|b| b.height);
+            blocks.dedup_by_key(|b| b.height);
+            blocks.last().map(|b| b.height.min(u64::from(u32::MAX)) as u32)
+        }; // blocks lock released before emit
+        if let Some(height) = highest_height {
+            let _ = self.app.emit(
+                "sync-progress",
+                SyncProgressEvent {
+                    height,
+                    total: self.tip_height,
+                },
+            );
+        }
         Ok(())
     }
 
@@ -578,12 +616,16 @@ struct DerivedWalletAddresses {
     transparent_address: String,
 }
 
-fn derive_real_addresses(normalized_mnemonic: &str, network: &str) -> Result<DerivedWalletAddresses, String> {
+fn derive_real_addresses(
+    normalized_mnemonic: &str,
+    network: &str,
+    account_index: u32,
+) -> Result<DerivedWalletAddresses, String> {
     let seed = Mnemonic::parse_in_normalized(Language::English, normalized_mnemonic)
         .map_err(|e| format!("mnemonic parse failed: {}", e))?
         .to_seed("");
-
-    let account = AccountId::ZERO;
+    let account = AccountId::try_from(account_index)
+        .map_err(|_| format!("invalid account index: {}", account_index))?;
     if network == "testnet" {
         let usk = UnifiedSpendingKey::from_seed(&TEST_NETWORK, &seed, account)
             .map_err(|e| format!("USK derivation failed: {}", e))?;
@@ -702,10 +744,36 @@ fn derive_ufvk_addresses<P: zcash_protocol::consensus::Parameters + Copy>(
     })
 }
 
+/// Minimum birthday heights equal to the Sapling activation heights — the oldest point
+/// zcash_client_backend supports for shielded wallet scanning.
 fn default_birthday_height(network: &str) -> u32 {
     match network {
         "testnet" => 280_000,
         _ => 419_200,
+    }
+}
+
+/// Fetch the current chain tip and return it as the wallet birthday height.
+/// Falls back to `default_birthday_height` if the network is unreachable, so wallet
+/// creation is never blocked by a connectivity issue.
+async fn fetch_chain_tip_for_birthday(app: &tauri::AppHandle, network: &str) -> u32 {
+    let endpoint = match load_lightwalletd_endpoint(app) {
+        Ok(ep) => normalize_grpc_endpoint(&ep),
+        Err(_) => DEFAULT_LIGHTWALLETD_ENDPOINT.to_string(),
+    };
+    let candidates = lightwalletd_endpoint_candidates(&endpoint, network);
+    match probe_and_connect(&candidates).await {
+        Ok((_, tip)) => {
+            log::info!("wallet birthday: using chain tip {} for network={}", tip, network);
+            tip
+        }
+        Err(e) => {
+            log::warn!(
+                "wallet birthday: could not reach lightwalletd ({}); using Sapling activation height",
+                e
+            );
+            default_birthday_height(network)
+        }
     }
 }
 
@@ -714,6 +782,8 @@ fn to_public_snapshot(record: &WalletRecord) -> WalletSnapshot {
         network: record.network.clone(),
         wallet_name: record.wallet_name.clone(),
         wallet_fingerprint: record.wallet_fingerprint.clone(),
+        account_index: record.account_index,
+        seed_fingerprint: record.seed_fingerprint.clone(),
         unified_address: record.unified_address.clone(),
         orchard_unified_address: record.orchard_unified_address.clone(),
         sapling_unified_address: record.sapling_unified_address.clone(),
@@ -728,10 +798,13 @@ fn to_public_snapshot(record: &WalletRecord) -> WalletSnapshot {
 }
 
 fn build_preview_snapshot(normalized_mnemonic: &str, network: &str, birthday_height: u32) -> WalletSnapshot {
+    let seed_fp = deterministic_hex(&format!("fp|{}", normalized_mnemonic), 16);
     WalletSnapshot {
         network: network.to_string(),
         wallet_name: String::new(),
-        wallet_fingerprint: deterministic_hex(&format!("fp|{}", normalized_mnemonic), 16),
+        wallet_fingerprint: seed_fp.clone(),
+        account_index: 0,
+        seed_fingerprint: seed_fp,
         unified_address: String::new(),
         orchard_unified_address: String::new(),
         sapling_unified_address: String::new(),
@@ -751,16 +824,31 @@ fn build_record(
     birthday_height: u32,
     password: &str,
     wallet_name: Option<&str>,
+    account_index: u32,
 ) -> Result<WalletRecord, String> {
-    let derived = derive_real_addresses(normalized_mnemonic, network)?;
+    let derived = derive_real_addresses(normalized_mnemonic, network, account_index)?;
     let (mnemonic_ciphertext_b64, mnemonic_salt_b64, mnemonic_nonce_b64) =
         encrypt_mnemonic(normalized_mnemonic, password)?;
-    let fingerprint = deterministic_hex(&format!("fp|{}", normalized_mnemonic), 16);
+    // The seed fingerprint is always derived from account 0 so sibling accounts are linked.
+    let seed_fingerprint = deterministic_hex(&format!("fp|{}", normalized_mnemonic), 16);
+    // Per-account fingerprint: account 0 keeps the legacy value for backward compatibility;
+    // accounts 1+ append the index so each gets a unique identifier and a separate SQLite DB.
+    let wallet_fingerprint = if account_index == 0 {
+        seed_fingerprint.clone()
+    } else {
+        deterministic_hex(&format!("fp|{}|a{}", normalized_mnemonic, account_index), 16)
+    };
     let resolved_name = wallet_name
         .map(|n| n.trim())
         .filter(|n| !n.is_empty())
         .map(ToString::to_string)
-        .unwrap_or_else(|| format!("Wallet {}", &fingerprint[0..6]));
+        .unwrap_or_else(|| {
+            if account_index == 0 {
+                format!("Wallet {}", &seed_fingerprint[0..6])
+            } else {
+                format!("Wallet {} (Account {})", &seed_fingerprint[0..6], account_index)
+            }
+        });
     Ok(WalletRecord {
         mnemonic: None,
         mnemonic_ciphertext_b64,
@@ -768,7 +856,9 @@ fn build_record(
         mnemonic_nonce_b64,
         network: network.to_string(),
         wallet_name: resolved_name,
-        wallet_fingerprint: fingerprint,
+        wallet_fingerprint,
+        account_index,
+        seed_fingerprint,
         unified_address: derived.unified_address,
         orchard_unified_address: derived.orchard_unified_address,
         sapling_unified_address: derived.sapling_unified_address,
@@ -951,53 +1041,65 @@ fn lightwalletd_endpoint_candidates(configured: &str, network: &str) -> Vec<Stri
     out
 }
 
-async fn select_lightwalletd_endpoint(candidates: &[String]) -> Result<String, String> {
-    let mut errors = Vec::new();
+/// Race all candidate endpoints in parallel and return the first one that connects and returns a
+/// chain tip.  Keeping the live `CompactTxStreamerClient` avoids a second round-trip inside
+/// `sync_wallet_for_network` and reuses the already-established HTTP/2 connection.
+async fn probe_and_connect(
+    candidates: &[String],
+) -> Result<(CompactTxStreamerClient<Channel>, u32), String> {
+    if candidates.is_empty() {
+        return Err("no lightwalletd candidates configured".to_string());
+    }
+
+    let (tx, mut rx) =
+        tokio::sync::mpsc::channel::<Result<(CompactTxStreamerClient<Channel>, u32), String>>(
+            candidates.len(),
+        );
+
     for endpoint in candidates {
-        log::info!("sync endpoint probe start: {}", endpoint);
-        match CompactTxStreamerClient::connect(endpoint.clone()).await {
-            Ok(_) => {
-                log::info!("sync endpoint probe success: {}", endpoint);
-                return Ok(endpoint.clone());
+        let ep = endpoint.clone();
+        let tx = tx.clone();
+        tokio::spawn(async move {
+            log::info!("lightwalletd probe: {}", ep);
+            let result: Result<(CompactTxStreamerClient<Channel>, u32), String> = async {
+                let channel = tonic::transport::Endpoint::new(ep.clone())
+                    .map_err(|e| format!("{}: invalid endpoint: {}", ep, e))?
+                    .tcp_keepalive(Some(std::time::Duration::from_secs(60)))
+                    .http2_keep_alive_interval(std::time::Duration::from_secs(60))
+                    .keep_alive_while_idle(true)
+                    .connect()
+                    .await
+                    .map_err(|e| format!("{}: connect: {}", ep, e))?;
+                let mut client = CompactTxStreamerClient::new(channel);
+                let tip = client
+                    .get_latest_block(service::ChainSpec {})
+                    .await
+                    .map_err(|e| format!("{}: get_latest_block: {}", ep, e))?
+                    .into_inner()
+                    .height
+                    .min(u64::from(u32::MAX)) as u32;
+                log::info!("lightwalletd probe success: {} tip={}", ep, tip);
+                Ok((client, tip))
             }
-            Err(error) => {
-                log::warn!("sync endpoint probe failed: {} => {}", endpoint, error);
-                errors.push(format!("{} => {}", endpoint, error));
+            .await;
+            if let Err(ref e) = result {
+                log::warn!("lightwalletd probe failed: {}", e);
             }
+            let _ = tx.send(result).await;
+        });
+    }
+    // Drop the last sender so the channel closes once all tasks finish.
+    drop(tx);
+
+    let mut errors = Vec::new();
+    while let Some(result) = rx.recv().await {
+        match result {
+            Ok(pair) => return Ok(pair),
+            Err(e) => errors.push(e),
         }
     }
     Err(format!(
         "lightwalletd connect failed for all candidates: {}",
-        errors.join(" | ")
-    ))
-}
-
-async fn select_lightwalletd_endpoint_with_tip(candidates: &[String]) -> Result<(String, u32), String> {
-    let mut errors = Vec::new();
-    for endpoint in candidates {
-        log::info!("sync endpoint tip probe start: {}", endpoint);
-        let mut client = match CompactTxStreamerClient::connect(endpoint.clone()).await {
-            Ok(client) => client,
-            Err(error) => {
-                log::warn!("sync endpoint tip probe connect failed: {} => {}", endpoint, error);
-                errors.push(format!("{} connect => {}", endpoint, error));
-                continue;
-            }
-        };
-        match client.get_latest_block(service::ChainSpec {}).await {
-            Ok(resp) => {
-                let tip = resp.into_inner().height.min(u64::from(u32::MAX)) as u32;
-                log::info!("sync endpoint tip probe success: {} tip={}", endpoint, tip);
-                return Ok((endpoint.clone(), tip));
-            }
-            Err(error) => {
-                log::warn!("sync endpoint tip probe failed: {} => {}", endpoint, error);
-                errors.push(format!("{} tip => {}", endpoint, error));
-            }
-        }
-    }
-    Err(format!(
-        "lightwalletd tip probe failed for all candidates: {}",
         errors.join(" | ")
     ))
 }
@@ -1017,6 +1119,55 @@ fn wallet_data_db_path(app: &tauri::AppHandle, wallet_fingerprint: &str) -> Resu
     Ok(dir.join(format!("wallet-{}.db", wallet_fingerprint)))
 }
 
+/// Returns the DB key for a wallet record. All accounts from the same seed share one SQLite DB
+/// (keyed by seed_fingerprint). For account 0, seed_fingerprint == wallet_fingerprint, so the
+/// path is identical to the pre-multi-account path — no migration needed.
+fn wallet_db_key(wallet: &WalletRecord) -> &str {
+    if wallet.seed_fingerprint.is_empty() {
+        &wallet.wallet_fingerprint
+    } else {
+        &wallet.seed_fingerprint
+    }
+}
+
+/// Find the DB-internal account ID and the zip32 account index for the account at
+/// `wallet.account_index` inside a shared WalletDb. Returns an error if the account is not found
+/// or is a watch-only import (cannot spend).
+fn find_wallet_account_id<C, P>(
+    db_data: &mut WalletDb<C, P, SystemClock, rand::rngs::OsRng>,
+    wallet: &WalletRecord,
+) -> Result<(<WalletDb<C, P, SystemClock, rand::rngs::OsRng> as WalletRead>::AccountId, AccountId), String>
+where
+    C: std::borrow::Borrow<rusqlite::Connection>,
+    P: zcash_protocol::consensus::Parameters + Clone,
+{
+    let target = AccountId::try_from(wallet.account_index)
+        .map_err(|_| format!("invalid account index {}", wallet.account_index))?;
+    let all_ids = db_data
+        .get_account_ids()
+        .map_err(|e| format!("wallet account query failed: {}", e))?;
+    for id in all_ids {
+        let acc = db_data
+            .get_account(id)
+            .map_err(|e| format!("wallet account lookup failed: {}", e))?
+            .ok_or_else(|| "Wallet account metadata is missing.".to_string())?;
+        match acc.source() {
+            AccountSource::Derived { derivation, .. } => {
+                if derivation.account_index() == target {
+                    return Ok((id, derivation.account_index()));
+                }
+            }
+            AccountSource::Imported { .. } => {
+                return Err("This wallet account is watch-only/imported and cannot send.".to_string());
+            }
+        }
+    }
+    Err(format!(
+        "Account at ZIP-32 index {} not found in wallet DB.",
+        wallet.account_index
+    ))
+}
+
 fn hex_encode(bytes: &[u8]) -> String {
     let mut out = String::with_capacity(bytes.len() * 2);
     const HEX: &[u8; 16] = b"0123456789abcdef";
@@ -1032,29 +1183,19 @@ async fn sync_wallet_for_network<P>(
     app: &tauri::AppHandle,
     wallet: &WalletRecord,
     seed_bytes: &[u8],
-    endpoint: &str,
+    mut client: CompactTxStreamerClient<Channel>,
+    tip_height: u32,
 ) -> Result<(), String>
 where
     P: zcash_protocol::consensus::Parameters + Clone + Send + Sync + 'static,
 {
     let sync_started = Instant::now();
-    let candidates = lightwalletd_endpoint_candidates(endpoint, wallet.network.as_str());
     log::info!(
-        "sync_wallet_for_network start: wallet={} network={} candidates={}",
+        "sync_wallet_for_network start: wallet={} network={} tip={}",
         wallet.wallet_fingerprint,
         wallet.network,
-        candidates.len()
+        tip_height,
     );
-    let (selected_endpoint, tip_height) = select_lightwalletd_endpoint_with_tip(&candidates).await?;
-    let mut client = CompactTxStreamerClient::connect(selected_endpoint.clone())
-        .await
-        .map_err(|e| format!("lightwalletd connect failed: {}", e))?;
-    log::info!(
-        "sync using lightwalletd endpoint: wallet={} endpoint={}",
-        wallet.wallet_fingerprint,
-        selected_endpoint
-    );
-
     log::info!(
         "sync tip received: wallet={} tip={} birthday={}",
         wallet.wallet_fingerprint,
@@ -1062,7 +1203,9 @@ where
         wallet.birthday_height
     );
 
-    let data_db_path = wallet_data_db_path(app, &wallet.wallet_fingerprint)?;
+    // All accounts from the same seed share a single SQLite DB (keyed by seed_fingerprint).
+    // For account 0, seed_fingerprint == wallet_fingerprint, so the path is unchanged.
+    let data_db_path = wallet_data_db_path(app, wallet_db_key(wallet))?;
     log::info!(
         "sync opening wallet db: wallet={} path={}",
         wallet.wallet_fingerprint,
@@ -1076,12 +1219,14 @@ where
     let account_ids = db_data
         .get_account_ids()
         .map_err(|e| format!("wallet account query failed: {}", e))?;
-    if account_ids.is_empty() {
+    // create_account auto-increments: calling it N+1 times produces accounts 0..N.
+    // We share this DB across all accounts from the seed, so accounts 0..N-1 may already exist.
+    let needed = (wallet.account_index + 1) as usize;
+    if account_ids.len() < needed {
         let birthday_prior_height = wallet.birthday_height.saturating_sub(1).min(tip_height);
         log::info!(
-            "sync account missing; creating account: wallet={} birthday_prior_height={}",
-            wallet.wallet_fingerprint,
-            birthday_prior_height
+            "sync accounts missing ({} present, {} needed): wallet={} birthday_prior_height={}",
+            account_ids.len(), needed, wallet.wallet_fingerprint, birthday_prior_height
         );
         let tree_state = match client
             .get_tree_state(service::BlockId {
@@ -1116,12 +1261,14 @@ where
         };
         let birthday = AccountBirthday::from_treestate(tree_state, Some(tip_height.into()))
             .map_err(|_| "birthday creation failed from tree state".to_string())?;
-        db_data
-            .create_account(&wallet.wallet_name, &SecretVec::new(seed_bytes.to_vec()), &birthday, None)
-            .map_err(|e| format!("wallet account creation failed: {}", e))?;
+        for idx in account_ids.len()..needed {
+            db_data
+                .create_account(&wallet.wallet_name, &SecretVec::new(seed_bytes.to_vec()), &birthday, None)
+                .map_err(|e| format!("wallet account creation failed at index {}: {}", idx, e))?;
+        }
     }
 
-    let db_cache = MemoryBlockCache::default();
+    let db_cache = MemoryBlockCache::new(app.clone(), tip_height);
     log::info!(
         "sync::run start: wallet={} tip={}",
         wallet.wallet_fingerprint,
@@ -1146,7 +1293,7 @@ where
 }
 
 #[tauri::command]
-fn wallet_create(
+async fn wallet_create(
     app: tauri::AppHandle,
     network: String,
 ) -> Result<WalletCreateResponse, String> {
@@ -1159,7 +1306,9 @@ fn wallet_create(
     let mnemonic = Mnemonic::generate_in(Language::English, 24)
         .map_err(|e| format!("mnemonic generation failed: {}", e))?;
     let normalized = normalize_mnemonic(&mnemonic.to_string());
-    let birthday_height = default_birthday_height(&network);
+    // Use the current chain tip so the wallet only scans from "now" forward,
+    // not from the Sapling activation height (~2 years of unnecessary history).
+    let birthday_height = fetch_chain_tip_for_birthday(&app, &network).await;
     let preview = build_preview_snapshot(&normalized, &network, birthday_height);
     let draft_id = deterministic_hex(
         &format!("draft|{}|{}|{}", normalized, network, now_unix_ts()),
@@ -1214,33 +1363,43 @@ fn wallet_finalize_create(
         });
     }
     let draft_path = wallet_create_draft_file(&app)?;
-    if let Some(draft) = read_wallet_create_draft(&draft_path)? {
-        if let Some(expected) = draft_id {
-            if expected != draft.draft_id {
+    // Read draft birthday before the borrow is consumed by the validation block.
+    let draft_birthday: Option<u32> = match read_wallet_create_draft(&draft_path)? {
+        Some(draft) => {
+            if let Some(expected) = draft_id {
+                if expected != draft.draft_id {
+                    return Ok(WalletOpResponse {
+                        ok: false,
+                        snapshot: None,
+                        error: Some("Wallet creation draft expired. Please restart create-wallet flow.".to_string()),
+                    });
+                }
+            }
+            if draft.network != network || draft.mnemonic != normalized {
                 return Ok(WalletOpResponse {
                     ok: false,
                     snapshot: None,
-                    error: Some("Wallet creation draft expired. Please restart create-wallet flow.".to_string()),
+                    error: Some("Wallet creation draft mismatch. Please restart create-wallet flow.".to_string()),
                 });
             }
+            Some(draft.birthday_height)
         }
-        if draft.network != network || draft.mnemonic != normalized {
-            return Ok(WalletOpResponse {
-                ok: false,
-                snapshot: None,
-                error: Some("Wallet creation draft mismatch. Please restart create-wallet flow.".to_string()),
-            });
-        }
-    }
+        None => None,
+    };
+    // Birthday priority: explicit caller param > draft (chain tip fetched at creation time) > safe fallback.
+    let effective_birthday = birthday_height
+        .or(draft_birthday)
+        .unwrap_or_else(|| default_birthday_height(&network));
     let path = wallet_store_file(&app)?;
     let mut store = read_wallet_store(&path)?;
     let resolved_password = resolve_wallet_password(&app, &mut store, password)?;
     let record = build_record(
         &normalized,
         &network,
-        birthday_height.unwrap_or_else(|| default_birthday_height(&network)),
+        effective_birthday,
         &resolved_password,
         wallet_name.as_deref(),
+        0,
     )?;
     upsert_wallet(&mut store, record.clone());
     write_wallet_store(&path, &store)?;
@@ -1285,12 +1444,17 @@ fn wallet_restore(
     let path = wallet_store_file(&app)?;
     let mut store = read_wallet_store(&path)?;
     let resolved_password = resolve_wallet_password(&app, &mut store, password)?;
+    // When no birthday is given for a restore, default to the Sapling activation height rather
+    // than genesis so scanning is bounded to the shielded era. Users who know their wallet
+    // predates this or want a full sweep can pass birthdayHeight=0 explicitly from the UI.
+    let effective_birthday = birthday_height.unwrap_or_else(|| default_birthday_height(&network));
     let record = build_record(
         &normalized,
         &network,
-        birthday_height.unwrap_or_else(|| default_birthday_height(&network)),
+        effective_birthday,
         &resolved_password,
         wallet_name.as_deref(),
+        0,
     )?;
     upsert_wallet(&mut store, record.clone());
     write_wallet_store(&path, &store)?;
@@ -1302,6 +1466,99 @@ fn wallet_restore(
     Ok(WalletOpResponse {
         ok: true,
         snapshot: Some(snapshot),
+        error: None,
+    })
+}
+
+/// Derive a new ZIP-32 account from an existing wallet's seed phrase.
+///
+/// This follows the industry-standard single-seed / multi-account model: the user keeps ONE
+/// backup mnemonic and derives as many independent address sets as they need at account indexes
+/// 0, 1, 2, … Each account has completely different Orchard, Sapling, and transparent addresses.
+/// Birthday height is set to the current chain tip so only future transactions need scanning.
+#[tauri::command]
+async fn wallet_add_account(
+    app: tauri::AppHandle,
+    source_fingerprint: String,
+    wallet_name: Option<String>,
+) -> Result<WalletOpResponse, String> {
+    let path = wallet_store_file(&app)?;
+    let store = read_wallet_store(&path)?;
+    ensure_app_unlocked(&app, &store)?;
+
+    let source = store
+        .wallets
+        .iter()
+        .find(|w| w.wallet_fingerprint == source_fingerprint)
+        .ok_or_else(|| "Source wallet not found.".to_string())?
+        .clone();
+
+    let mnemonic = wallet_plain_mnemonic(&app, &store, &source)?;
+    let normalized = normalize_mnemonic(&mnemonic);
+    let seed_fp = deterministic_hex(&format!("fp|{}", normalized), 16);
+
+    // Find the highest account_index already in use for this seed so we can pick the next one.
+    let max_existing: u32 = store
+        .wallets
+        .iter()
+        .filter(|w| {
+            // Match by seed_fingerprint when present (new wallets), or wallet_fingerprint for the
+            // account-0 wallet created before this field existed.
+            if !w.seed_fingerprint.is_empty() {
+                w.seed_fingerprint == seed_fp
+            } else {
+                w.wallet_fingerprint == seed_fp
+            }
+        })
+        .map(|w| w.account_index)
+        .max()
+        .unwrap_or(0);
+
+    let new_account_index = max_existing + 1;
+
+    // Use the current chain tip as birthday; this account has no history before now.
+    let birthday_height = fetch_chain_tip_for_birthday(&app, &source.network).await;
+
+    // Get the app password from in-memory state (same source wallet_plain_mnemonic uses)
+    // so we can re-encrypt the mnemonic when storing the new account record.
+    let mut store = read_wallet_store(&path)?;
+    let app_password = get_unlocked_password(&app)
+        .ok_or_else(|| "App is locked. Unlock the app first.".to_string())?;
+
+    let record = build_record(
+        &normalized,
+        &source.network,
+        birthday_height,
+        &app_password,
+        wallet_name.as_deref(),
+        new_account_index,
+    )?;
+
+    // Guard: reject if this account fingerprint already exists (idempotent add).
+    if store.wallets.iter().any(|w| w.wallet_fingerprint == record.wallet_fingerprint) {
+        return Ok(WalletOpResponse {
+            ok: false,
+            snapshot: None,
+            error: Some(format!(
+                "Account {} from this seed already exists.",
+                new_account_index
+            )),
+        });
+    }
+
+    upsert_wallet(&mut store, record.clone());
+    write_wallet_store(&path, &store)?;
+
+    log::info!(
+        "wallet_add_account: created account_index={} seed_fingerprint={} wallet_fingerprint={}",
+        new_account_index,
+        seed_fp,
+        record.wallet_fingerprint
+    );
+
+    Ok(WalletOpResponse {
+        ok: true,
+        snapshot: Some(to_public_snapshot(&record)),
         error: None,
     })
 }
@@ -1332,7 +1589,7 @@ fn wallet_reconcile_derived_addresses(app: tauri::AppHandle) -> Result<WalletOpR
         let raw = wallet_plain_mnemonic(&app, &store, &active)?;
         normalize_mnemonic(&raw)
     };
-    let derived = derive_real_addresses(&normalized, &active.network)?;
+    let derived = derive_real_addresses(&normalized, &active.network, active.account_index)?;
     if !derived_addresses_match_record(&active, &derived) {
         let mut updated = active.clone();
         updated.unified_address = derived.unified_address.clone();
@@ -1581,7 +1838,7 @@ fn wallet_reset(app: tauri::AppHandle) -> Result<WalletOpResponse, String> {
 /// Reads balances from the local wallet DB populated by [`sync_wallet_for_network`] / `start_sync`.
 /// Does not run a chain sync (avoids racing `start_sync` and long-blocking UI refresh).
 /// Uses [`ConfirmationsPolicy::MIN`] so newly detected incoming funds appear in totals sooner; sends still use ZIP-315 defaults.
-fn read_wallet_balance_from_db<P>(data_db_path: &Path, params: P) -> Result<BalanceInfo, String>
+fn read_wallet_balance_from_db<P>(data_db_path: &Path, params: P, account_index: u32) -> Result<BalanceInfo, String>
 where
     P: zcash_protocol::consensus::Parameters + Copy,
 {
@@ -1597,6 +1854,26 @@ where
     }
     let db_data = WalletDb::for_path(data_db_path, params, SystemClock, rand::rngs::OsRng)
         .map_err(|e| format!("wallet db open failed: {}", e))?;
+    // Resolve the DB-internal AccountId for the requested zip32 account_index.
+    let target_zip32 = AccountId::try_from(account_index)
+        .map_err(|_| format!("invalid account index: {}", account_index))?;
+    let target_db_account_id = {
+        let all_ids = db_data
+            .get_account_ids()
+            .map_err(|e| format!("account ids query failed: {}", e))?;
+        let mut found = None;
+        for id in all_ids {
+            if let Ok(Some(acc)) = db_data.get_account(id) {
+                if let AccountSource::Derived { derivation, .. } = acc.source() {
+                    if derivation.account_index() == target_zip32 {
+                        found = Some(id);
+                        break;
+                    }
+                }
+            }
+        }
+        found
+    };
     let summary = db_data
         .get_wallet_summary(ConfirmationsPolicy::MIN)
         .map_err(|e| format!("wallet summary failed: {}", e))?;
@@ -1605,7 +1882,13 @@ where
     let mut transparent = 0u64;
     let mut pending = 0u64;
     if let Some(summary) = summary {
-        for bal in summary.account_balances().values() {
+        // Only sum balances for the account matching the requested zip32 account_index.
+        for (db_id, bal) in summary.account_balances() {
+            if let Some(ref target_id) = target_db_account_id {
+                if db_id != target_id {
+                    continue;
+                }
+            }
             orchard = orchard.saturating_add(bal.orchard_balance().total().into_u64());
             sapling = sapling.saturating_add(bal.sapling_balance().total().into_u64());
             transparent = transparent.saturating_add(bal.unshielded_balance().total().into_u64());
@@ -1622,6 +1905,12 @@ where
             let target_height = TargetHeight::from(tip + 1);
             for account_id in db_data.get_account_ids().map_err(|e| format!("account ids failed: {}", e))?
             {
+                // Filter fallback loop to the target account only.
+                if let Some(ref target_id) = target_db_account_id {
+                    if &account_id != target_id {
+                        continue;
+                    }
+                }
                 match db_data.get_transparent_balances(
                     account_id,
                     target_height,
@@ -1711,12 +2000,12 @@ async fn get_balance(app: tauri::AppHandle) -> Result<BalanceInfo, String> {
     let store = read_wallet_store(&path)?;
     ensure_app_unlocked(&app, &store)?;
     let wallet = active_wallet(&store).ok_or_else(|| "Wallet is not initialized.".to_string())?;
-    let data_db_path = wallet_data_db_path(&app, &wallet.wallet_fingerprint)?;
+    let data_db_path = wallet_data_db_path(&app, wallet_db_key(wallet))?;
     let network = wallet.network.clone();
     for attempt in 0u32..10 {
         let res = match network.as_str() {
-            "mainnet" => read_wallet_balance_from_db(&data_db_path, MAIN_NETWORK),
-            "testnet" => read_wallet_balance_from_db(&data_db_path, TEST_NETWORK),
+            "mainnet" => read_wallet_balance_from_db(&data_db_path, MAIN_NETWORK, wallet.account_index),
+            "testnet" => read_wallet_balance_from_db(&data_db_path, TEST_NETWORK, wallet.account_index),
             _ => return Err("Unsupported network. Use mainnet or testnet.".to_string()),
         };
         match res {
@@ -1837,7 +2126,7 @@ async fn execute_transfer(app: tauri::AppHandle, proposal_json: String) -> Resul
         .to_seed("");
     let endpoint = normalize_grpc_endpoint(&load_lightwalletd_endpoint(&app)?);
     let endpoint_candidates = lightwalletd_endpoint_candidates(&endpoint, wallet.network.as_str());
-    let selected_endpoint = select_lightwalletd_endpoint(&endpoint_candidates).await?;
+    let (client, tip_height) = probe_and_connect(&endpoint_candidates).await?;
 
     let memo_bytes = if let Some(memo) = proposal.memo.clone().filter(|m| !m.trim().is_empty()) {
         Some(
@@ -1862,26 +2151,12 @@ async fn execute_transfer(app: tauri::AppHandle, proposal_json: String) -> Resul
 
     match wallet.network.as_str() {
         "mainnet" => {
-            sync_wallet_for_network(MAIN_NETWORK, &app, wallet, &seed, &endpoint).await?;
-            let data_db_path = wallet_data_db_path(&app, &wallet.wallet_fingerprint)?;
+            let mut broadcast_client = client.clone();
+            sync_wallet_for_network(MAIN_NETWORK, &app, wallet, &seed, client, tip_height).await?;
+            let data_db_path = wallet_data_db_path(&app, wallet_db_key(wallet))?;
             let mut db_data = WalletDb::for_path(&data_db_path, MAIN_NETWORK, SystemClock, rand::rngs::OsRng)
                 .map_err(|e| format!("wallet db open failed: {}", e))?;
-            let account_id = db_data
-                .get_account_ids()
-                .map_err(|e| format!("wallet account query failed: {}", e))?
-                .first()
-                .copied()
-                .ok_or_else(|| "No wallet account is initialized.".to_string())?;
-            let account = db_data
-                .get_account(account_id)
-                .map_err(|e| format!("wallet account lookup failed: {}", e))?
-                .ok_or_else(|| "Wallet account metadata is missing.".to_string())?;
-            let account_index = match account.source() {
-                AccountSource::Derived { derivation, .. } => derivation.account_index(),
-                AccountSource::Imported { .. } => {
-                    return Err("This wallet account is watch-only/imported and cannot send.".to_string())
-                }
-            };
+            let (account_id, account_index) = find_wallet_account_id(&mut db_data, wallet)?;
             let to = zcash_keys::address::Address::decode(&MAIN_NETWORK, proposal.to.trim())
                 .ok_or_else(|| "Invalid recipient address.".to_string())?;
             let amount =
@@ -1904,7 +2179,7 @@ async fn execute_transfer(app: tauri::AppHandle, proposal_json: String) -> Resul
                     let e_str = e.to_string();
                     if e_str.to_lowercase().contains("insufficient") && !wallet.transparent_address.trim().is_empty() {
                         if let Ok(tb) =
-                            fetch_transparent_balance_fallback(&selected_endpoint, wallet.transparent_address.trim())
+                            fetch_transparent_balance_fallback(&endpoint, wallet.transparent_address.trim())
                                 .await
                         {
                             if tb > 0 {
@@ -1946,10 +2221,7 @@ async fn execute_transfer(app: tauri::AppHandle, proposal_json: String) -> Resul
             let mut raw_tx = Vec::new();
             tx.write(&mut raw_tx)
                 .map_err(|e| format!("transaction serialization failed: {}", e))?;
-            let mut client = CompactTxStreamerClient::connect(selected_endpoint)
-                .await
-                .map_err(|e| format!("lightwalletd connect failed: {}", e))?;
-            let send_resp = client
+            let send_resp = broadcast_client
                 .send_transaction(service::RawTransaction {
                     data: raw_tx,
                     height: 0,
@@ -1969,26 +2241,12 @@ async fn execute_transfer(app: tauri::AppHandle, proposal_json: String) -> Resul
             Ok(txid.to_string())
         }
         "testnet" => {
-            sync_wallet_for_network(TEST_NETWORK, &app, wallet, &seed, &endpoint).await?;
-            let data_db_path = wallet_data_db_path(&app, &wallet.wallet_fingerprint)?;
+            let mut broadcast_client = client.clone();
+            sync_wallet_for_network(TEST_NETWORK, &app, wallet, &seed, client, tip_height).await?;
+            let data_db_path = wallet_data_db_path(&app, wallet_db_key(wallet))?;
             let mut db_data = WalletDb::for_path(&data_db_path, TEST_NETWORK, SystemClock, rand::rngs::OsRng)
                 .map_err(|e| format!("wallet db open failed: {}", e))?;
-            let account_id = db_data
-                .get_account_ids()
-                .map_err(|e| format!("wallet account query failed: {}", e))?
-                .first()
-                .copied()
-                .ok_or_else(|| "No wallet account is initialized.".to_string())?;
-            let account = db_data
-                .get_account(account_id)
-                .map_err(|e| format!("wallet account lookup failed: {}", e))?
-                .ok_or_else(|| "Wallet account metadata is missing.".to_string())?;
-            let account_index = match account.source() {
-                AccountSource::Derived { derivation, .. } => derivation.account_index(),
-                AccountSource::Imported { .. } => {
-                    return Err("This wallet account is watch-only/imported and cannot send.".to_string())
-                }
-            };
+            let (account_id, account_index) = find_wallet_account_id(&mut db_data, wallet)?;
             let to = zcash_keys::address::Address::decode(&TEST_NETWORK, proposal.to.trim())
                 .ok_or_else(|| "Invalid recipient address.".to_string())?;
             let amount =
@@ -2011,7 +2269,7 @@ async fn execute_transfer(app: tauri::AppHandle, proposal_json: String) -> Resul
                     let e_str = e.to_string();
                     if e_str.to_lowercase().contains("insufficient") && !wallet.transparent_address.trim().is_empty() {
                         if let Ok(tb) =
-                            fetch_transparent_balance_fallback(&selected_endpoint, wallet.transparent_address.trim())
+                            fetch_transparent_balance_fallback(&endpoint, wallet.transparent_address.trim())
                                 .await
                         {
                             if tb > 0 {
@@ -2053,10 +2311,7 @@ async fn execute_transfer(app: tauri::AppHandle, proposal_json: String) -> Resul
             let mut raw_tx = Vec::new();
             tx.write(&mut raw_tx)
                 .map_err(|e| format!("transaction serialization failed: {}", e))?;
-            let mut client = CompactTxStreamerClient::connect(selected_endpoint)
-                .await
-                .map_err(|e| format!("lightwalletd connect failed: {}", e))?;
-            let send_resp = client
+            let send_resp = broadcast_client
                 .send_transaction(service::RawTransaction {
                     data: raw_tx,
                     height: 0,
@@ -2118,8 +2373,10 @@ fn start_sync(app: tauri::AppHandle) -> Result<(), String> {
             }
         };
         let sync_started = Instant::now();
-        let (selected_endpoint, tip_height) =
-            match select_lightwalletd_endpoint_with_tip(&endpoint_candidates).await {
+        // Race all candidates and keep the live client — avoids a second connect inside
+        // sync_wallet_for_network and reuses the established HTTP/2 channel.
+        let (client, tip_height) =
+            match probe_and_connect(&endpoint_candidates).await {
                 Ok(result) => result,
                 Err(error) => {
                     log::error!(
@@ -2137,9 +2394,8 @@ fn start_sync(app: tauri::AppHandle) -> Result<(), String> {
             };
         let start_height = active.birthday_height.min(tip_height);
         log::info!(
-            "start_sync tip received: wallet={} endpoint={} tip={} birthday={}",
+            "start_sync tip received: wallet={} tip={} birthday={}",
             active.wallet_fingerprint,
-            selected_endpoint,
             tip_height,
             active.birthday_height
         );
@@ -2152,8 +2408,8 @@ fn start_sync(app: tauri::AppHandle) -> Result<(), String> {
             },
         );
         let sync_res = match active.network.as_str() {
-            "mainnet" => sync_wallet_for_network(MAIN_NETWORK, &app_handle, &active, &seed, &selected_endpoint).await,
-            "testnet" => sync_wallet_for_network(TEST_NETWORK, &app_handle, &active, &seed, &selected_endpoint).await,
+            "mainnet" => sync_wallet_for_network(MAIN_NETWORK, &app_handle, &active, &seed, client, tip_height).await,
+            "testnet" => sync_wallet_for_network(TEST_NETWORK, &app_handle, &active, &seed, client, tip_height).await,
             _ => Err("Unsupported network. Use mainnet or testnet.".to_string()),
         };
         if let Err(error) = sync_res {
@@ -2188,12 +2444,18 @@ fn get_transactions(app: tauri::AppHandle, limit: u32) -> Result<Vec<TxInfo>, St
     let store = read_wallet_store(&path)?;
     ensure_app_unlocked(&app, &store)?;
     let wallet = active_wallet(&store).ok_or_else(|| "Wallet is not initialized.".to_string())?;
-    let data_db_path = wallet_data_db_path(&app, &wallet.wallet_fingerprint)?;
+    let data_db_path = wallet_data_db_path(&app, wallet_db_key(wallet))?;
     if !data_db_path.exists() {
         return Ok(Vec::new());
     }
     let conn = rusqlite::Connection::open(&data_db_path)
         .map_err(|e| format!("wallet db open failed: {}", e))?;
+    // WAL + 5 s busy timeout lets this read-only query coexist with an in-progress sync write
+    // without returning "database is locked" immediately.
+    conn.execute_batch(
+        "PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000; PRAGMA synchronous=NORMAL;",
+    )
+    .map_err(|e| format!("wallet db pragma setup failed: {}", e))?;
     // `v_transactions` provides wallet-relative deltas and fee. We add best-effort counterparty
     // address extraction:
     // - For sends: first non-change `sent_notes.to_address`.
@@ -2227,6 +2489,7 @@ fn get_transactions(app: tauri::AppHandle, limit: u32) -> Result<Vec<TxInfo>, St
             ) AS received_at
         FROM v_transactions v
         JOIN transactions t ON t.txid = v.txid
+        WHERE v.account_uuid = (SELECT uuid FROM accounts ORDER BY id LIMIT 1 OFFSET ?2)
         ORDER BY COALESCE(v.mined_height, 0) DESC, COALESCE(v.tx_index, 0) DESC
         LIMIT ?1
     ";
@@ -2234,8 +2497,9 @@ fn get_transactions(app: tauri::AppHandle, limit: u32) -> Result<Vec<TxInfo>, St
         .prepare_cached(query)
         .map_err(|e| format!("transaction query prepare failed: {}", e))?;
     let tx_limit = i64::from(limit.max(1).min(500));
+    let account_offset = i64::from(wallet.account_index);
     let rows = stmt
-        .query_map(params![tx_limit], |row| {
+        .query_map(params![tx_limit, account_offset], |row| {
             let txid_bytes: Vec<u8> = row.get(0)?;
             let value_zat: i64 = row.get(1)?;
             let block_time: i64 = row.get(2)?;
@@ -2304,12 +2568,11 @@ async fn get_latest_block_height(app: tauri::AppHandle) -> Result<u32, String> {
     let active = active_wallet(&store).ok_or_else(|| "Wallet is not initialized.".to_string())?;
     let endpoint = normalize_grpc_endpoint(&load_lightwalletd_endpoint(&app)?);
     let endpoint_candidates = lightwalletd_endpoint_candidates(&endpoint, active.network.as_str());
-    let (selected_endpoint, tip_height) = select_lightwalletd_endpoint_with_tip(&endpoint_candidates).await?;
+    let (_, tip_height) = probe_and_connect(&endpoint_candidates).await?;
     log::info!(
-        "get_latest_block_height wallet={} network={} endpoint={} tip={}",
+        "get_latest_block_height wallet={} network={} tip={}",
         active.wallet_fingerprint,
         active.network,
-        selected_endpoint,
         tip_height
     );
     Ok(tip_height)
@@ -2445,6 +2708,7 @@ pub fn run() {
             wallet_create,
             wallet_finalize_create,
             wallet_restore,
+            wallet_add_account,
             wallet_reconcile_derived_addresses,
             wallet_get_state,
             wallet_list,
