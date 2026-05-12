@@ -21,6 +21,8 @@ export function WalletDetail({ walletId }: { walletId: string }) {
   const [renameBusy, setRenameBusy] = useState(false);
   const [backupBusy, setBackupBusy] = useState(false);
   const [removeBusy, setRemoveBusy] = useState(false);
+  const [revealedMnemonic, setRevealedMnemonic] = useState<string | null>(null);
+  const [revealBusy, setRevealBusy] = useState(false);
 
   useEffect(() => {
     setWalletName(wallet?.walletName ?? "");
@@ -137,6 +139,69 @@ export function WalletDetail({ walletId }: { walletId: string }) {
         >
           {backupBusy ? "Preparing backup..." : "Download wallet backup"}
         </button>
+      </div>
+
+      <div className="card card-pad" style={{ marginBottom: 14 }}>
+        <h3 className="t-h3" style={{ marginBottom: 6 }}>Seed phrase</h3>
+        <p className="t-body text-gray-600" style={{ marginBottom: 10 }}>
+          The 24-word recovery phrase for this wallet. Anyone with access to this phrase can spend your funds — never share it.
+        </p>
+        {revealedMnemonic ? (
+          <>
+            <div
+              className="t-mono"
+              style={{
+                padding: 12,
+                borderRadius: "var(--r-sm)",
+                background: "var(--gray-25)",
+                border: "1px solid var(--gray-100)",
+                lineHeight: 1.7,
+                wordBreak: "break-word",
+                marginBottom: 10,
+              }}
+            >
+              {revealedMnemonic.split(" ").map((word, i) => (
+                <span key={i} style={{ marginRight: 8 }}>
+                  <span className="text-gray-400" style={{ fontSize: "0.7em", marginRight: 2 }}>{i + 1}.</span>
+                  {word}
+                </span>
+              ))}
+            </div>
+            <div className="hstack gap-8">
+              <button
+                className="btn btn-ghost"
+                onClick={() => {
+                  void navigator.clipboard.writeText(revealedMnemonic);
+                  toast({ type: "success", title: "Copied to clipboard" });
+                }}
+              >
+                Copy
+              </button>
+              <button className="btn btn-ghost" onClick={() => setRevealedMnemonic(null)}>
+                Hide
+              </button>
+            </div>
+          </>
+        ) : (
+          <button
+            className="btn btn-secondary"
+            disabled={revealBusy}
+            onClick={async () => {
+              try {
+                setRevealBusy(true);
+                const backup = await exportWalletBackupNative(wallet.walletFingerprint);
+                setRevealedMnemonic(backup.mnemonic);
+              } catch (error) {
+                const detail = error instanceof Error ? error.message : "Could not reveal seed phrase.";
+                toast({ type: "danger", title: "Reveal failed", description: detail });
+              } finally {
+                setRevealBusy(false);
+              }
+            }}
+          >
+            {revealBusy ? "Verifying..." : "Reveal seed phrase"}
+          </button>
+        )}
       </div>
 
       <div className="card card-pad">
