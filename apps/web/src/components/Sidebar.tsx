@@ -59,13 +59,19 @@ export function Sidebar() {
       try {
         const bal = await walletApi.getBalance();
         const poolTotal = bal.orchardZat + bal.saplingZat + bal.transparentZat;
-        const spendable = typeof bal.spendableZat === "number"
+        const chainSpendable = typeof bal.spendableZat === "number"
           ? bal.spendableZat
           : Math.max(0, poolTotal - bal.pendingZat);
+        const walletState = useWalletStore.getState();
+        const activeWalletKey = walletState.activeWalletFingerprint || walletState.walletFingerprint;
+        const lockedInVaults = useVaultStore.getState().vaults
+          .filter((v) => (v.walletFingerprint || activeWalletKey) === activeWalletKey)
+          .reduce((acc, v) => acc + Math.max(0, v.currentBalanceZat), 0);
+        const spendable = Math.max(0, chainSpendable - lockedInVaults);
         // Some native snapshots can temporarily report `total` behind pending updates.
         // Keep UI coherent by deriving total from spendable + pending when higher.
         const totalFromApi = typeof bal.totalZat === "number" ? bal.totalZat : poolTotal;
-        const totalFromParts = spendable + bal.pendingZat;
+        const totalFromParts = chainSpendable + bal.pendingZat;
         const total = Math.max(totalFromApi, totalFromParts, poolTotal);
         setBalances({
           totalZat: total,
@@ -290,7 +296,11 @@ export function Sidebar() {
       clearInterval(txPoll);
       dispose();
     };
-  }, [applyWalletSnapshot, setBalances, setMarketData, setNativeTxHistory, setSyncMetrics, setSyncStatus, walletApi]);
+  // activeWalletFingerprint / fallbackWalletFingerprint in deps: re-run the whole polling
+  // cycle immediately when the user switches wallets so fresh data loads without waiting
+  // for the next interval tick.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [applyWalletSnapshot, setBalances, setMarketData, setNativeTxHistory, setSyncMetrics, setSyncStatus, walletApi, activeWalletFingerprint, fallbackWalletFingerprint]);
 
   return (
     <aside className="sidebar">
