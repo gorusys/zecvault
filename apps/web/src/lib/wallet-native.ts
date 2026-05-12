@@ -10,6 +10,10 @@ export interface NativeWalletSnapshot {
   network: "mainnet" | "testnet";
   walletName?: string;
   walletFingerprint: string;
+  /** ZIP-32 account index. 0 = first (default) account; 1, 2, … = additional accounts from the same seed. */
+  accountIndex?: number;
+  /** Fingerprint shared by all accounts from the same seed phrase (equals walletFingerprint for account 0). */
+  seedFingerprint?: string;
   unifiedAddress: string;
   /** Orchard-only unified address (`UnifiedAddressRequest::ORCHARD`), same diversifier as other receive addresses. */
   orchardUnifiedAddress?: string;
@@ -293,4 +297,28 @@ export async function resetWalletNative(): Promise<NativeOpResponse> {
     return invokeTauri<NativeOpResponse>("wallet_reset");
   }
   return { ok: true };
+}
+
+/**
+ * Derive a new ZIP-32 account from the seed of an existing wallet.
+ *
+ * This is the recommended way to "add a wallet" when the user already has a seed phrase
+ * in the app: instead of generating a new mnemonic, a new account (index 1, 2, …) is
+ * derived from the same seed.  A single backup phrase then covers all accounts.
+ *
+ * @param sourceFingerprint  walletFingerprint of any existing account from the target seed.
+ * @param walletName         Optional display name for the new account.
+ */
+export async function addAccountNative(
+  sourceFingerprint: string,
+  walletName?: string,
+): Promise<NativeOpResponse> {
+  if (!isTauriRuntime()) {
+    return { ok: false, error: "Native runtime unavailable." };
+  }
+  return invokeTauri<NativeOpResponse>(
+    "wallet_add_account",
+    { sourceFingerprint, walletName },
+    60_000,
+  );
 }

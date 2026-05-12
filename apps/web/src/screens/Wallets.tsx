@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import {
+  addAccountNative,
   createWalletNative,
   finalizeCreateWalletNative,
   listWalletsNative,
@@ -25,7 +26,7 @@ export function Wallets() {
   const vaults = useVaultStore((s) => s.vaults);
 
   const [showAdd, setShowAdd] = useState(false);
-  const [addMode, setAddMode] = useState<"create" | "import">("create");
+  const [addMode, setAddMode] = useState<"create" | "import" | "account">("create");
 
   const [createWalletName, setCreateWalletName] = useState("");
   const [createMnemonic, setCreateMnemonic] = useState("");
@@ -35,10 +36,16 @@ export function Wallets() {
 
   const [importMnemonic, setImportMnemonic] = useState("");
   const [importWalletName, setImportWalletName] = useState("");
+  const [importBirthdayHeight, setImportBirthdayHeight] = useState("");
   const [importBusy, setImportBusy] = useState(false);
+
+  const [accountSourceFingerprint, setAccountSourceFingerprint] = useState("");
+  const [accountName, setAccountName] = useState("");
+  const [accountBusy, setAccountBusy] = useState(false);
 
   const createNameValid = createWalletName.trim().length > 0;
   const importNameValid = importWalletName.trim().length > 0;
+  const accountSourceValid = accountSourceFingerprint.trim().length > 0;
 
   async function refreshWallets() {
     const listed = await listWalletsNative();
@@ -71,17 +78,23 @@ export function Wallets() {
         <div className="card card-pad" style={{ marginBottom: 16 }}>
           <div className="hstack gap-8" style={{ marginBottom: 14 }}>
             <button className={`btn ${addMode === "create" ? "btn-primary" : "btn-ghost"}`} onClick={() => setAddMode("create")}>
-              Create wallet
+              New seed
+            </button>
+            <button className={`btn ${addMode === "account" ? "btn-primary" : "btn-ghost"}`} onClick={() => setAddMode("account")}>
+              Add account
             </button>
             <button className={`btn ${addMode === "import" ? "btn-primary" : "btn-ghost"}`} onClick={() => setAddMode("import")}>
-              Import wallet
+              Import seed
             </button>
           </div>
 
-          {addMode === "create" ? (
+          {addMode === "create" && (
             <>
               {!createMnemonic ? (
                 <>
+                  <div className="t-caption text-gray-400" style={{ marginBottom: 10 }}>
+                    Generate a brand-new 24-word seed phrase. The wallet birthday is set to the current block height so syncing starts from today.
+                  </div>
                   <label className="label">Wallet name</label>
                   <input
                     className="input"
@@ -113,7 +126,7 @@ export function Wallets() {
                 </>
               ) : (
                 <>
-                  <div className="t-caption text-gray-400">Save this 24-word seed before finalizing:</div>
+                  <div className="t-caption text-gray-400">Write down this 24-word seed and store it offline. It cannot be recovered if lost.</div>
                   <div className="t-mono text-gray-600" style={{ marginTop: 8, padding: 10, borderRadius: "var(--r-sm)", background: "var(--gray-25)", border: "1px solid var(--gray-100)" }}>
                     {createMnemonic}
                   </div>
@@ -124,7 +137,7 @@ export function Wallets() {
                       onChange={(e) => setCreateSeedConfirmed(e.target.checked)}
                       style={{ marginTop: 2 }}
                     />
-                    <span className="t-caption text-gray-600">I confirmed this seed is backed up securely.</span>
+                    <span className="t-caption text-gray-600">I have backed up this seed securely.</span>
                   </label>
                   <div className="hstack gap-8" style={{ marginTop: 10 }}>
                     <button
@@ -174,8 +187,72 @@ export function Wallets() {
                 </>
               )}
             </>
-          ) : (
+          )}
+
+          {addMode === "account" && (
             <>
+              <div className="t-caption text-gray-400" style={{ marginBottom: 10 }}>
+                Derive an additional account from an existing seed phrase (ZIP-32). All accounts share one backup — no new seed is created.
+              </div>
+              <label className="label">Source wallet</label>
+              <select
+                className="input"
+                value={accountSourceFingerprint}
+                onChange={(e) => setAccountSourceFingerprint(e.target.value)}
+              >
+                <option value="">— Select a wallet —</option>
+                {wallets
+                  .filter((w) => (w.accountIndex ?? 0) === 0 || w.seedFingerprint === (wallets.find((x) => x.walletFingerprint === accountSourceFingerprint)?.seedFingerprint))
+                  .filter((w, i, arr) => arr.findIndex((x) => (x.seedFingerprint || x.walletFingerprint) === (w.seedFingerprint || w.walletFingerprint)) === i)
+                  .map((w) => (
+                    <option key={w.walletFingerprint} value={w.walletFingerprint}>
+                      {w.walletName || w.walletFingerprint} ({w.network})
+                    </option>
+                  ))}
+              </select>
+              <label className="label" style={{ marginTop: 8 }}>Account name (optional)</label>
+              <input
+                className="input"
+                value={accountName}
+                onChange={(e) => setAccountName(e.target.value)}
+                placeholder="e.g. Savings"
+              />
+              <button
+                className="btn btn-secondary"
+                style={{ marginTop: 10 }}
+                disabled={!accountSourceValid || accountBusy}
+                onClick={async () => {
+                  try {
+                    setAccountBusy(true);
+                    const resp = await addAccountNative(accountSourceFingerprint, accountName.trim() || undefined);
+                    if (!resp.ok) {
+                      toast({ type: "danger", title: "Add account failed", description: resp.error ?? "Could not derive new account." });
+                      return;
+                    }
+                    await refreshWallets();
+                    setAccountSourceFingerprint("");
+                    setAccountName("");
+                    setShowAdd(false);
+                    const idx = resp.snapshot?.accountIndex ?? "?";
+                    toast({ type: "success", title: `Account #${idx} added`, description: "Syncing from current block height." });
+                  } catch (error) {
+                    const detail = error instanceof Error ? error.message : "Could not derive new account.";
+                    toast({ type: "danger", title: "Add account failed", description: detail });
+                  } finally {
+                    setAccountBusy(false);
+                  }
+                }}
+              >
+                {accountBusy ? "Deriving..." : "Add account from seed"}
+              </button>
+            </>
+          )}
+
+          {addMode === "import" && (
+            <>
+              <div className="t-caption text-gray-400" style={{ marginBottom: 10 }}>
+                Restore a wallet from an existing 24-word seed phrase. If you know the approximate block height when the wallet first received funds, enter it below — this avoids scanning the entire chain history.
+              </div>
               <label className="label">Wallet name</label>
               <input
                 className="input"
@@ -191,6 +268,17 @@ export function Wallets() {
                 onChange={(e) => setImportMnemonic(e.target.value)}
                 placeholder="abandon ability able about above..."
               />
+              <label className="label" style={{ marginTop: 8 }}>
+                Birthday block height <span className="text-gray-400">(optional — leave blank to scan from Sapling activation)</span>
+              </label>
+              <input
+                className="input"
+                type="number"
+                min={0}
+                value={importBirthdayHeight}
+                onChange={(e) => setImportBirthdayHeight(e.target.value)}
+                placeholder="e.g. 2400000"
+              />
               <button
                 className="btn btn-secondary"
                 style={{ marginTop: 10 }}
@@ -198,7 +286,16 @@ export function Wallets() {
                 onClick={async () => {
                   try {
                     setImportBusy(true);
-                    const restored = await restoreWalletNative(importMnemonic, network, undefined, undefined, importWalletName.trim());
+                    const parsedHeight = importBirthdayHeight.trim()
+                      ? parseInt(importBirthdayHeight.trim(), 10)
+                      : undefined;
+                    const restored = await restoreWalletNative(
+                      importMnemonic,
+                      network,
+                      undefined,
+                      parsedHeight,
+                      importWalletName.trim(),
+                    );
                     if (!restored.ok || !restored.snapshot) {
                       toast({ type: "danger", title: "Import failed", description: restored.error ?? "Could not import wallet." });
                       return;
@@ -206,6 +303,7 @@ export function Wallets() {
                     await refreshWallets();
                     setImportMnemonic("");
                     setImportWalletName("");
+                    setImportBirthdayHeight("");
                     setShowAdd(false);
                     toast({ type: "success", title: "Wallet imported" });
                   } finally {
@@ -237,17 +335,12 @@ export function Wallets() {
                     <div className="hstack gap-8" style={{ alignItems: "center" }}>
                       <div className="t-body-med">{w.walletName?.trim() || w.walletFingerprint}</div>
                       {isActive && <span className="pill pill-success">Active</span>}
+                      {(w.accountIndex ?? 0) > 0 && <span className="pill">Account {w.accountIndex}</span>}
                     </div>
                     <div className="t-caption text-gray-400">
                       {w.network}
                     </div>
-                    <div className="t-caption text-gray-400" style={{ marginTop: 4 }}>
-                      Private: {w.unifiedAddress.slice(0, 12)}…{w.unifiedAddress.slice(-10)}
-                    </div>
-                    <div className="t-caption text-gray-400">
-                      Public: {w.transparentAddress.slice(0, 10)}…{w.transparentAddress.slice(-8)}
-                    </div>
-                    <div className="hstack gap-8" style={{ marginTop: 8, flexWrap: "wrap" }}>
+                    <div className="hstack gap-8" style={{ marginTop: 4, flexWrap: "wrap" }}>
                       <span className="pill">Total: {isActive ? `${fmtZec(totalZat)} ZEC` : "Set active to load"}</span>
                       <span className="pill">Locked: {fmtZec(lockedZat)} ZEC</span>
                       <span className="pill">Spendable: {isActive ? `${fmtZec(spendableZat)} ZEC` : "Set active to load"}</span>
