@@ -198,6 +198,18 @@ export function VaultDetailView({ vaultId }: { vaultId: string }) {
 
                 try {
                   if (sourceWalletFingerprint === vaultWalletFingerprint && memoText.length === 0) {
+                    addTx({
+                      id: mockTxId(`vault|${vaultWalletFingerprint}|${vault.id}|${Date.now()}`),
+                      type: "vault-deposit",
+                      amountZat: Math.abs(amountZat),
+                      walletFingerprint: vaultWalletFingerprint,
+                      fromAddress: sourceWallet.unifiedAddress,
+                      memo: undefined,
+                      vaultId: vault.id,
+                      blockHeight: 0,
+                      feeZat: 0,
+                      timestamp: Date.now(),
+                    });
                     deposit(vault.id, amountZat);
                     toast({
                       type: "success",

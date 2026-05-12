@@ -3,15 +3,16 @@ import type { Vault } from "@/stores";
 import { fmtZec, daysBetween } from "@/lib/zec";
 import { categoryOf } from "@/lib/categories";
 
+const CONFETTI_COLORS = ["var(--coral-400)", "var(--success-strong)", "var(--warning-strong)", "#4FA3E3", "#9B6BD8"];
+
 export function GoalComplete({ vault, onClose }: { vault: Vault; onClose: () => void }) {
   const cat = categoryOf(vault.category);
   const days = daysBetween(vault.createdTs, Date.now());
-  const colors = ["var(--coral-400)", "var(--success-strong)", "var(--warning-strong)", "#4FA3E3", "#9B6BD8"];
   const confetti = useMemo(() => Array.from({ length: 40 }, (_, i) => ({
     dx: (Math.random() - 0.5) * 600 + "px",
     dy: (Math.random() * 500 + 200) + "px",
     r: (Math.random() * 720 - 360) + "deg",
-    bg: colors[i % colors.length],
+    bg: CONFETTI_COLORS[i % CONFETTI_COLORS.length],
     delay: Math.random() * 0.3,
   })), []);
 
@@ -29,7 +30,7 @@ export function GoalComplete({ vault, onClose }: { vault: Vault; onClose: () => 
           {[
             { l: "Total saved", v: fmtZec(vault.currentBalanceZat) + " ZEC" },
             { l: "Days taken", v: days.toString() },
-            { l: "Deposits", v: "12" },
+            { l: "Deposits", v: String(vault.contributions.length) },
             { l: "Streak", v: "🔥 " + vault.streakDays },
           ].map((s) => (
             <div key={s.l} style={{ background: "var(--gray-25)", borderRadius: "var(--r-md)", padding: 14 }}>

@@ -316,17 +316,44 @@ interface VaultState {
   removeVault: (id: string) => void;
 }
 
+const ONE_DAY_MS = 24 * 60 * 60 * 1000;
+
+function dayStart(ts: number): number {
+  const d = new Date(ts);
+  d.setHours(0, 0, 0, 0);
+  return d.getTime();
+}
+
+function nextStreakDays(previousContributionTs: number, previousStreakDays: number, now: number): number {
+  if (!previousContributionTs || previousStreakDays <= 0) return 1;
+  const dayDelta = Math.floor((dayStart(now) - dayStart(previousContributionTs)) / ONE_DAY_MS);
+  if (dayDelta <= 0) return previousStreakDays;
+  if (dayDelta === 1) return previousStreakDays + 1;
+  return 1;
+}
+
+function adjustActiveWalletSpendable(walletFingerprint: string, deltaZat: number) {
+  if (!walletFingerprint || deltaZat === 0) return;
+  const walletState = useWalletStore.getState();
+  const activeWalletFingerprint = walletState.activeWalletFingerprint || walletState.walletFingerprint;
+  if (activeWalletFingerprint !== walletFingerprint) return;
+  useWalletStore.setState((state) => ({
+    spendableZat: Math.max(0, state.spendableZat + deltaZat),
+  }));
+}
+
 export const useVaultStore = create<VaultState>()(
   persist(
     (set, get) => ({
       vaults: [],
       archive: [],
       createVault: ({ walletFingerprint, category, goalName, targetZat, deadlineTs }) => {
+        const normalizedTarget = Math.max(1, Math.floor(targetZat));
         const idx = get().vaults.length + get().archive.length + 1;
         const v: Vault = {
           id: "v" + idx + "_" + Date.now().toString(36),
           walletFingerprint,
-          category, goalName, targetZat, deadlineTs,
+          category, goalName, targetZat: normalizedTarget, deadlineTs,
           createdTs: Date.now(),
           shieldedAddress: mockUnifiedAddress(`${walletFingerprint}|vault-${category}`, idx),
           derivationIndex: idx,
@@ -342,16 +369,61 @@ export const useVaultStore = create<VaultState>()(
         set({ vaults: [v, ...get().vaults] });
         return v;
       },
-      deposit: (id, amountZat) => set({
-        vaults: get().vaults.map((v) => v.id === id
-          ? { ...v, currentBalanceZat: v.currentBalanceZat + amountZat, lastContributionTs: Date.now(), streakDays: v.streakDays + 1 }
-          : v),
-      }),
+      deposit: (id, amountZat) => {
+        const normalizedAmount = Math.max(0, Math.floor(amountZat));
+        if (normalizedAmount <= 0) return;
+        const vault = get().vaults.find((x) => x.id === id);
+        if (!vault) return;
+        const now = Date.now();
+        const contribution: TxRecord = {
+          id: mockTxId(`vault-deposit|${vault.id}|${now}`),
+          type: "vault-deposit",
+          amountZat: normalizedAmount,
+          walletFingerprint: vault.walletFingerprint,
+          vaultId: vault.id,
+          blockHeight: 0,
+          feeZat: 0,
+          timestamp: now,
+        };
+        set({
+          vaults: get().vaults.map((v) => {
+            if (v.id !== id) return v;
+            return {
+              ...v,
+              currentBalanceZat: v.currentBalanceZat + normalizedAmount,
+              contributions: [contribution, ...v.contributions],
+              lastContributionTs: now,
+              streakDays: nextStreakDays(v.lastContributionTs, v.streakDays, now),
+            };
+          }),
+        });
+        adjustActiveWalletSpendable(vault.walletFingerprint, -normalizedAmount);
+      },
       getVaultsForWallet: (walletFingerprint) => get().vaults.filter((v) => (v.walletFingerprint || walletFingerprint) === walletFingerprint),
       getArchiveForWallet: (walletFingerprint) => get().archive.filter((v) => (v.walletFingerprint || walletFingerprint) === walletFingerprint),
-      completeVault: (id) => set({
-        vaults: get().vaults.map((v) => v.id === id ? { ...v, status: "complete" as const } : v),
-      }),
+      completeVault: (id) => {
+        const vault = get().vaults.find((x) => x.id === id);
+        if (!vault) return;
+        const now = Date.now();
+        set({
+          vaults: get().vaults.filter((v) => v.id !== id),
+          archive: [{ ...vault, status: "complete" as const, breakRequest: null }, ...get().archive],
+        });
+        if (vault.currentBalanceZat > 0) {
+          useWalletStore.getState().addTx({
+            id: mockTxId(`vault-complete|${vault.id}|${now}`),
+            type: "vault-withdraw",
+            amountZat: Math.abs(vault.currentBalanceZat),
+            walletFingerprint: vault.walletFingerprint,
+            vaultId: vault.id,
+            memo: "Vault goal completed",
+            blockHeight: 0,
+            feeZat: 0,
+            timestamp: now,
+          });
+          adjustActiveWalletSpendable(vault.walletFingerprint, Math.abs(vault.currentBalanceZat));
+        }
+      },
       requestBreak: (id) => set({
         vaults: get().vaults.map((v) => v.id === id
           ? { ...v, status: "breaking" as const, breakRequest: { requestTs: Date.now(), unlockTs: Date.now() + 24 * 3600 * 1000 } }
@@ -363,10 +435,25 @@ export const useVaultStore = create<VaultState>()(
       executeBreak: (id) => {
         const v = get().vaults.find((x) => x.id === id);
         if (!v) return;
+        const now = Date.now();
         set({
           vaults: get().vaults.filter((x) => x.id !== id),
           archive: [{ ...v, status: "archived" as const }, ...get().archive],
         });
+        if (v.currentBalanceZat > 0) {
+          useWalletStore.getState().addTx({
+            id: mockTxId(`vault-break|${v.id}|${now}`),
+            type: "vault-withdraw",
+            amountZat: Math.abs(v.currentBalanceZat),
+            walletFingerprint: v.walletFingerprint,
+            vaultId: v.id,
+            memo: "Vault broken early",
+            blockHeight: 0,
+            feeZat: 0,
+            timestamp: now,
+          });
+          adjustActiveWalletSpendable(v.walletFingerprint, Math.abs(v.currentBalanceZat));
+        }
       },
       removeVault: (id) => set({ vaults: get().vaults.filter((v) => v.id !== id) }),
     }),
