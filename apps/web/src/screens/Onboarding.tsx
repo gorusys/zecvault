@@ -28,6 +28,7 @@ export function Onboarding() {
   const [createdSnapshot, setCreatedSnapshot] = useState<NativeWalletSnapshot | null>(null);
   const [createdDraftId, setCreatedDraftId] = useState<string | undefined>(undefined);
   const [recoverPhrase, setRecoverPhrase] = useState("");
+  const [recoverBirthday, setRecoverBirthday] = useState("");
   const recoverNormalized = normalizeMnemonic(recoverPhrase);
   const recoverWordCount = recoverNormalized ? recoverNormalized.split(" ").length : 0;
   const recoverValid = isValidWalletMnemonic(recoverNormalized);
@@ -124,7 +125,14 @@ export function Onboarding() {
         }
         try {
           setSubmitting(true);
-          const finalized = await finalizeCreateWalletNative(seed.join(" "), network, walletPassword, undefined, createdDraftId);
+          const finalized = await finalizeCreateWalletNative(
+            seed.join(" "),
+            network,
+            walletPassword,
+            undefined,
+            createdDraftId,
+            name.trim(),
+          );
           if (!finalized.ok || !finalized.snapshot) {
             toast({ type: "danger", title: "Wallet creation failed", description: finalized.error ?? "Could not finalize wallet creation." });
             return;
@@ -140,7 +148,8 @@ export function Onboarding() {
       } else {
         try {
           setSubmitting(true);
-          const restored = await restoreWalletNative(recoverNormalized, network, walletPassword);
+          const parsedBirthday = recoverBirthday.trim() ? parseInt(recoverBirthday.trim(), 10) : undefined;
+          const restored = await restoreWalletNative(recoverNormalized, network, walletPassword, parsedBirthday, name.trim());
           if (!restored.ok) {
             toast({ type: "danger", title: "Invalid seed phrase", description: restored.error ?? "Please check your 24 words and try again." });
             return;
@@ -240,7 +249,7 @@ export function Onboarding() {
                     setSeedRetryToken((n) => n + 1);
                   }}
                 />
-              : <StepRecover value={recoverPhrase} setValue={setRecoverPhrase} wordCount={recoverWordCount} isValid={recoverValid} />)}
+              : <StepRecover value={recoverPhrase} setValue={setRecoverPhrase} wordCount={recoverWordCount} isValid={recoverValid} birthday={recoverBirthday} setBirthday={setRecoverBirthday} />)}
             {step === 3 && (
               <StepBackup
                 walletChoice={walletChoice}
@@ -480,7 +489,13 @@ function StepBackup({
   );
 }
 
-function StepRecover({ value, setValue, wordCount, isValid }: { value: string; setValue: (v: string) => void; wordCount: number; isValid: boolean }) {
+function StepRecover({
+  value, setValue, wordCount, isValid, birthday, setBirthday,
+}: {
+  value: string; setValue: (v: string) => void;
+  wordCount: number; isValid: boolean;
+  birthday: string; setBirthday: (v: string) => void;
+}) {
   return (
     <>
       <h2 className="t-h1">Restore your wallet</h2>
@@ -494,6 +509,22 @@ function StepRecover({ value, setValue, wordCount, isValid }: { value: string; s
           Enter a valid 24-word BIP39 seed phrase.
         </div>
       )}
+      <label className="label" style={{ marginTop: 20 }}>
+        Birthday block height <span className="text-gray-400">(optional)</span>
+      </label>
+      <input
+        className="input"
+        type="number"
+        min={0}
+        value={birthday}
+        onChange={(e) => setBirthday(e.target.value)}
+        placeholder="e.g. 2400000 — leave blank to scan from Sapling activation"
+      />
+      <p className="t-caption text-gray-400" style={{ marginTop: 6 }}>
+        If you know when this wallet was first created, entering the block height speeds up the initial sync.
+        Leave blank to scan the full shielded history (safest option). Transparent funds received before
+        the birthday are still recoverable via the "Shield transparent funds" flow on the Send screen.
+      </p>
     </>
   );
 }

@@ -56,10 +56,12 @@ function RootShell({ children }: { children: React.ReactNode }) {
 function AppShell() {
   const onboardingComplete = useSettings((s) => s.onboardingComplete);
   const theme = useSettings((s) => s.theme);
+  const setSetting = useSettings((s) => s.set);
   const setWallets = useWalletStore((s) => s.setWallets);
   const [mounted, setMounted] = useState(false);
   const [lockConfigured, setLockConfigured] = useState(false);
   const [appLocked, setAppLocked] = useState(false);
+  const [hasNativeWallets, setHasNativeWallets] = useState(false);
 
   useEffect(() => {
     if (typeof document === "undefined") return;
@@ -74,6 +76,12 @@ function AppShell() {
         if (ignore) return;
         setLockConfigured(lock.configured);
         setAppLocked(lock.locked);
+        setHasNativeWallets(Boolean(lock.hasWallets));
+
+        // If a native wallet store already exists (e.g. dev → AppImage), treat onboarding as done.
+        if (lock.hasWallets && !onboardingComplete) {
+          setSetting("onboardingComplete", true);
+        }
         if (!lock.locked) {
           const nativeState = await listWalletsNative();
           if (!ignore) setWallets(nativeState.wallets, nativeState.activeWalletFingerprint);
@@ -88,11 +96,11 @@ function AppShell() {
     return () => {
       ignore = true;
     };
-  }, [setWallets]);
+  }, [onboardingComplete, setSetting, setWallets]);
 
   if (!mounted) return null;
 
-  if (onboardingComplete && lockConfigured && appLocked) {
+  if ((onboardingComplete || hasNativeWallets) && lockConfigured && appLocked) {
     return (
       <>
         <AppUnlockScreen
@@ -110,7 +118,7 @@ function AppShell() {
     );
   }
 
-  if (!onboardingComplete) {
+  if (!onboardingComplete && !hasNativeWallets) {
     return (<><Onboarding /><ToastStack /></>);
   }
 

@@ -2,12 +2,16 @@ import { useEffect, useState } from "react";
 import { Link, useNavigate } from "@tanstack/react-router";
 import {
   exportWalletBackupNative,
+  getWalletBalanceNative,
   listWalletsNative,
+  migrateSaplingToOrchardNative,
   removeWalletNative,
   renameWalletNative,
   saveTextFileWithDialogNative,
+  updateWalletBirthdayNative,
 } from "@/lib/wallet-native";
 import { useWalletStore } from "@/stores";
+import { fmtZec } from "@/lib/zec";
 import { toast } from "@/stores/toast";
 
 export function WalletDetail({ walletId }: { walletId: string }) {
@@ -21,10 +25,27 @@ export function WalletDetail({ walletId }: { walletId: string }) {
   const [renameBusy, setRenameBusy] = useState(false);
   const [backupBusy, setBackupBusy] = useState(false);
   const [removeBusy, setRemoveBusy] = useState(false);
+  const [revealedMnemonic, setRevealedMnemonic] = useState<string | null>(null);
+  const [revealBusy, setRevealBusy] = useState(false);
+  const [birthdayInput, setBirthdayInput] = useState(String(wallet?.birthdayHeight ?? ""));
+  const [birthdayBusy, setBirthdayBusy] = useState(false);
+  const [saplingZat, setSaplingZat] = useState(0);
+  const [migrateBusy, setMigrateBusy] = useState(false);
 
   useEffect(() => {
     setWalletName(wallet?.walletName ?? "");
   }, [wallet?.walletName]);
+
+  useEffect(() => {
+    setBirthdayInput(String(wallet?.birthdayHeight ?? ""));
+  }, [wallet?.birthdayHeight]);
+
+  useEffect(() => {
+    if (!wallet) return;
+    void getWalletBalanceNative(wallet.walletFingerprint).then((b) => {
+      if (b) setSaplingZat(b.saplingZat);
+    });
+  }, [wallet?.walletFingerprint]);
 
   async function refreshWallets() {
     const listed = await listWalletsNative();
@@ -138,6 +159,168 @@ export function WalletDetail({ walletId }: { walletId: string }) {
           {backupBusy ? "Preparing backup..." : "Download wallet backup"}
         </button>
       </div>
+
+      <div className="card card-pad" style={{ marginBottom: 14 }}>
+        <h3 className="t-h3" style={{ marginBottom: 4 }}>Birthday height</h3>
+        <p className="t-body text-gray-600" style={{ marginBottom: 10 }}>
+          The block height from which this wallet starts scanning for shielded history. Lowering it
+          finds older transactions; raising it speeds up sync but may hide earlier history until
+          you lower it again.
+          {wallet.birthdayHeight
+            ? <> Current birthday: <strong>{wallet.birthdayHeight.toLocaleString()}</strong>.</>
+            : null}
+        </p>
+        <div style={{ padding: 12, borderRadius: "var(--r-sm)", background: "var(--warning-bg)", marginBottom: 12 }}>
+          <p className="t-caption" style={{ color: "var(--warning-text)", margin: 0 }}>
+            Changing the birthday deletes the local wallet database and triggers a full rescan from
+            the new height. All transaction history will be re-downloaded — this may take several
+            minutes for old wallets.
+          </p>
+        </div>
+        <label className="label">New birthday block height</label>
+        <input
+          className="input"
+          type="number"
+          min={0}
+          value={birthdayInput}
+          onChange={(e) => setBirthdayInput(e.target.value)}
+          placeholder={`e.g. ${wallet.birthdayHeight?.toLocaleString() ?? "419200"}`}
+          disabled={birthdayBusy}
+        />
+        <button
+          className="btn btn-secondary"
+          style={{ marginTop: 10 }}
+          disabled={birthdayBusy || !birthdayInput.trim() || isNaN(parseInt(birthdayInput, 10))}
+          onClick={async () => {
+            const newHeight = parseInt(birthdayInput.trim(), 10);
+            if (isNaN(newHeight) || newHeight < 0) {
+              toast({ type: "warning", title: "Invalid height", description: "Enter a non-negative block number." });
+              return;
+            }
+            const confirmed = window.confirm(
+              `Update birthday to block ${newHeight.toLocaleString()}?\n\n` +
+              "This will delete the local wallet database. All history will be re-synced on the next sync. Continue?",
+            );
+            if (!confirmed) return;
+            try {
+              setBirthdayBusy(true);
+              const resp = await updateWalletBirthdayNative(wallet.walletFingerprint, newHeight);
+              if (!resp.ok) {
+                toast({ type: "danger", title: "Update failed", description: resp.error ?? "Could not update birthday." });
+                return;
+              }
+              await refreshWallets();
+              toast({
+                type: "success",
+                title: "Birthday updated",
+                description: "Wallet database reset. Sync from the Dashboard to re-download history.",
+              });
+            } finally {
+              setBirthdayBusy(false);
+            }
+          }}
+        >
+          {birthdayBusy ? "Updating…" : "Update birthday & rescan"}
+        </button>
+      </div>
+
+      <div className="card card-pad" style={{ marginBottom: 14 }}>
+        <h3 className="t-h3" style={{ marginBottom: 6 }}>Seed phrase</h3>
+        <p className="t-body text-gray-600" style={{ marginBottom: 10 }}>
+          The 24-word recovery phrase for this wallet. Anyone with access to this phrase can spend your funds — never share it.
+        </p>
+        {revealedMnemonic ? (
+          <>
+            <div
+              className="t-mono"
+              style={{
+                padding: 12,
+                borderRadius: "var(--r-sm)",
+                background: "var(--gray-25)",
+                border: "1px solid var(--gray-100)",
+                lineHeight: 1.7,
+                wordBreak: "break-word",
+                marginBottom: 10,
+              }}
+            >
+              {revealedMnemonic.split(" ").map((word, i) => (
+                <span key={i} style={{ marginRight: 8 }}>
+                  <span className="text-gray-400" style={{ fontSize: "0.7em", marginRight: 2 }}>{i + 1}.</span>
+                  {word}
+                </span>
+              ))}
+            </div>
+            <div className="hstack gap-8">
+              <button
+                className="btn btn-ghost"
+                onClick={() => {
+                  void navigator.clipboard.writeText(revealedMnemonic);
+                  toast({ type: "success", title: "Copied to clipboard" });
+                }}
+              >
+                Copy
+              </button>
+              <button className="btn btn-ghost" onClick={() => setRevealedMnemonic(null)}>
+                Hide
+              </button>
+            </div>
+          </>
+        ) : (
+          <button
+            className="btn btn-secondary"
+            disabled={revealBusy}
+            onClick={async () => {
+              try {
+                setRevealBusy(true);
+                const backup = await exportWalletBackupNative(wallet.walletFingerprint);
+                setRevealedMnemonic(backup.mnemonic);
+              } catch (error) {
+                const detail = error instanceof Error ? error.message : "Could not reveal seed phrase.";
+                toast({ type: "danger", title: "Reveal failed", description: detail });
+              } finally {
+                setRevealBusy(false);
+              }
+            }}
+          >
+            {revealBusy ? "Verifying..." : "Reveal seed phrase"}
+          </button>
+        )}
+      </div>
+
+      {saplingZat > 0 && (
+        <div className="card card-pad" style={{ marginBottom: 14, borderColor: "var(--warning-200)" }}>
+          <h3 className="t-h3" style={{ marginBottom: 6 }}>Sapling balance detected</h3>
+          <p className="t-body text-gray-600" style={{ marginBottom: 10 }}>
+            This wallet holds <strong>{fmtZec(saplingZat)} ZEC</strong> in the Sapling pool.
+            Moving these funds to Orchard improves privacy and reduces future fees.
+          </p>
+          <button
+            className="btn btn-secondary"
+            disabled={migrateBusy}
+            onClick={async () => {
+              const confirmed = window.confirm(
+                "Migrate all Sapling funds to the Orchard pool?\n\n" +
+                "This sends your Sapling balance to your own Orchard address. A sync will run first.",
+              );
+              if (!confirmed) return;
+              try {
+                setMigrateBusy(true);
+                const resp = await migrateSaplingToOrchardNative();
+                if (!resp.ok) {
+                  toast({ type: "danger", title: "Migration failed", description: resp.error ?? "Could not migrate Sapling funds." });
+                  return;
+                }
+                setSaplingZat(0);
+                toast({ type: "success", title: "Migration broadcast", description: "Sapling funds are on their way to Orchard. Sync to confirm." });
+              } finally {
+                setMigrateBusy(false);
+              }
+            }}
+          >
+            {migrateBusy ? "Migrating…" : "Migrate to Orchard"}
+          </button>
+        </div>
+      )}
 
       <div className="card card-pad">
         <h3 className="t-h3" style={{ marginBottom: 10, color: "var(--danger-text)" }}>Danger zone</h3>

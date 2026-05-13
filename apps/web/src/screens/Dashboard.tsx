@@ -1,4 +1,5 @@
 import { useMemo, useState } from "react";
+import { Link } from "@tanstack/react-router";
 import { useSettings, useVaultStore, useWalletStore } from "@/stores";
 import { fmtZec, fmtFiat, formatRelativeTime, truncateAddress } from "@/lib/zec";
 import { categoryOf } from "@/lib/categories";
@@ -6,11 +7,30 @@ import { AnimatedNumber } from "@/components/AnimatedNumber";
 import { Icon } from "@/components/Icon";
 import { VaultCard } from "@/components/VaultCard";
 import { NewVaultDrawer } from "./NewVaultDrawer";
-import { Link } from "@tanstack/react-router";
+import { toast } from "@/stores/toast";
 
 export function Dashboard() {
   const userName = useSettings((s) => s.userName);
-  const { totalZat, spendableZat, zecUsdPrice, priceChange24h, txHistory, syncStatus, syncProgress, unifiedAddress, saplingAddress, transparentAddress, wallets, activeWalletFingerprint, walletFingerprint } = useWalletStore();
+  const expertAddressMode = useSettings((s) => s.expertAddressMode);
+  const {
+    totalZat,
+    spendableZat,
+    pendingZat,
+    zecUsdPrice,
+    priceChange24h,
+    txHistory,
+    syncStatus,
+    syncProgress,
+    unifiedAddress,
+    saplingAddress,
+    transparentAddress,
+    wallets,
+    activeWalletFingerprint,
+    walletFingerprint,
+    orchardZat,
+    saplingZat,
+    transparentZat,
+  } = useWalletStore();
   const vaults = useVaultStore((s) => s.vaults);
   const archive = useVaultStore((s) => s.archive);
   const [showNewVault, setShowNewVault] = useState(false);
@@ -42,6 +62,15 @@ export function Dashboard() {
     [activeWalletVaults],
   );
   const recentTx = activeWalletTx.slice(0, 6);
+  const displayUnified = unifiedAddress || activeWallet?.unifiedAddress || "";
+  const displaySapling = saplingAddress || activeWallet?.saplingAddress || "";
+  const displayTransparent = transparentAddress || activeWallet?.transparentAddress || "";
+
+  function copyAddress(label: string, value: string) {
+    if (!value) return;
+    navigator.clipboard?.writeText(value);
+    toast({ type: "success", title: `${label} address copied` });
+  }
 
   return (
     <div className="fade-in">
@@ -50,15 +79,47 @@ export function Dashboard() {
         <div>
           <div className="t-caption text-gray-400">{greeting}, {userName}</div>
           <h1 className="t-h1">{activeWalletName}</h1>
-          <div className="hstack gap-8" style={{ marginTop: 8, flexWrap: "wrap" }}>
-            {(unifiedAddress || activeWallet?.unifiedAddress) && (
-              <span className="pill">{truncateAddress(unifiedAddress || activeWallet?.unifiedAddress || "")}</span>
-            )}
-            {(saplingAddress || activeWallet?.saplingAddress) && (
-              <span className="pill">{truncateAddress(saplingAddress || activeWallet?.saplingAddress || "")}</span>
-            )}
-            {(transparentAddress || activeWallet?.transparentAddress) && (
-              <span className="pill">{truncateAddress(transparentAddress || activeWallet?.transparentAddress || "")}</span>
+          <div className="hstack gap-8" style={{ marginTop: 8, flexWrap: "wrap", alignItems: "center" }}>
+            {expertAddressMode ? (
+              <>
+                {displayUnified && (
+                  <button type="button" className="pill pill-info" title="Unified (click to copy)" onClick={() => copyAddress("Unified", displayUnified)}>
+                    {truncateAddress(displayUnified)}
+                  </button>
+                )}
+                {displaySapling && (
+                  <button type="button" className="pill pill-success" title="Sapling (click to copy)" onClick={() => copyAddress("Sapling", displaySapling)}>
+                    {truncateAddress(displaySapling)}
+                  </button>
+                )}
+                {displayTransparent && (
+                  <button type="button" className="pill pill-warning" title="Transparent (click to copy)" onClick={() => copyAddress("Transparent", displayTransparent)}>
+                    {truncateAddress(displayTransparent)}
+                  </button>
+                )}
+              </>
+            ) : (
+              <>
+                {displayUnified && (
+                  <button type="button" className="pill pill-success" title="Private receive (click to copy)" onClick={() => copyAddress("Private", displayUnified)}>
+                    Private receive {truncateAddress(displayUnified)}
+                  </button>
+                )}
+                {displayTransparent && (
+                  <button type="button" className="pill pill-warning" title="Public receive (click to copy)" onClick={() => copyAddress("Public", displayTransparent)}>
+                    Public receive {truncateAddress(displayTransparent)}
+                  </button>
+                )}
+                {/* <Link
+                  to="/receive"
+                  className="btn btn-ghost"
+                  title="Open Receive for QR codes, all address types, and optional expert combinations"
+                  style={{ height: 32, padding: "0 12px", display: "inline-flex", alignItems: "center", gap: 6, flexShrink: 0 }}
+                >
+                  <Icon name="receive" size={14} />
+                  Receive
+                </Link> */}
+              </>
             )}
           </div>
         </div>
@@ -88,7 +149,7 @@ export function Dashboard() {
         <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 0 }}>
           <Stat label="Total balance" value={Number(totalZat) / 1e8} fiat={fmtFiat(totalZat, zecUsdPrice)} color="var(--gray-800)" />
           <Stat label="Locked in vaults" value={lockedZat / 1e8} fiat={fmtFiat(lockedZat, zecUsdPrice)} color="var(--coral-400)" divider />
-          <Stat label="Spendable" value={Number(spendableZat) / 1e8} fiat={fmtFiat(spendableZat, zecUsdPrice)} color="var(--success-strong)" divider />
+          <Stat label="Available to send" value={Number(spendableZat) / 1e8} fiat={fmtFiat(spendableZat, zecUsdPrice)} color="var(--success-strong)" divider />
           <div style={{ paddingLeft: 24, borderLeft: "1px solid var(--gray-100)" }}>
             <div className="t-label">ZEC price</div>
             <div className="hstack gap-8" style={{ marginTop: 6 }}>
@@ -101,7 +162,60 @@ export function Dashboard() {
             <div className="t-caption text-gray-400" style={{ marginTop: 4 }}>24h change</div>
           </div>
         </div>
+        {(orchardZat > 0 || saplingZat > 0 || transparentZat > 0) && (
+          <div style={{ marginTop: 16, paddingTop: 16, borderTop: "1px solid var(--gray-100)", textAlign: "left" }}>
+            <div className="t-caption text-gray-400" style={{ marginBottom: 8 }}>Pool breakdown</div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+              {orchardZat > 0 && (
+                <div className="hstack gap-8" style={{ justifyContent: "space-between" }}>
+                  <span className="t-caption text-gray-600">
+                    Orchard <span className="pill pill-success" style={{ fontSize: "0.7rem", padding: "1px 6px" }}>private</span>
+                  </span>
+                  <span className="t-mono t-caption">{fmtZec(orchardZat)} ZEC</span>
+                </div>
+              )}
+              {saplingZat > 0 && (
+                <div className="hstack gap-8" style={{ justifyContent: "space-between" }}>
+                  <span className="t-caption text-gray-600">
+                    Sapling <span className="pill" style={{ fontSize: "0.7rem", padding: "1px 6px", background: "#e0f2f7", color: "#0077a0", border: "none" }}>private</span>
+                  </span>
+                  <span className="t-mono t-caption">{fmtZec(saplingZat)} ZEC</span>
+                </div>
+              )}
+              {transparentZat > 0 && (
+                <div className="hstack gap-8" style={{ justifyContent: "space-between" }}>
+                  <span className="t-caption text-gray-600">
+                    Transparent <span className="pill pill-warning" style={{ fontSize: "0.7rem", padding: "1px 6px" }}>public</span>
+                  </span>
+                  <span className="t-mono t-caption">{fmtZec(transparentZat)} ZEC</span>
+                </div>
+              )}
+            </div>
+            {saplingZat > 0 && (
+              <div className="t-caption text-gray-400" style={{ marginTop: 10 }}>
+                Sapling funds detected. Visit Wallet Detail to migrate them to Orchard for better privacy.
+              </div>
+            )}
+          </div>
+        )}
       </div>
+      {totalZat === 0 && wallets.length > 1 && (
+        <div className="card card-pad" style={{ marginBottom: 20, textAlign: "left", borderColor: "var(--warning-200)" }}>
+          <div className="t-body-med" style={{ marginBottom: 6 }}>Active wallet has zero balance</div>
+          <p className="t-caption text-gray-600" style={{ marginBottom: 10 }}>
+            You have multiple wallets in this app. Your funds may be in another wallet profile.
+          </p>
+          <Link to="/wallets" className="btn btn-ghost" style={{ height: 32, padding: "0 12px", display: "inline-flex", alignItems: "center", gap: 6 }}>
+            <Icon name="wallet" size={14} />
+            Switch wallet
+          </Link>
+        </div>
+      )}
+      {pendingZat > 0 && (
+        <p className="t-caption text-gray-500" style={{ marginTop: 10, marginBottom: 0 }}>
+          Pending (not spendable yet): <span className="t-mono">{fmtZec(pendingZat)}</span>
+        </p>
+      )}
 
       {/* Vaults section */}
       <div className="hstack between" style={{ marginBottom: 14 }}>

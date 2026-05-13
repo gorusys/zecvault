@@ -47,8 +47,9 @@ export default defineConfig(({ command, mode }) => {
         isDesktopBuild
           ? {
               prerender: {
-                // Desktop builds package static client assets for Tauri and don't require prerendering.
-                enabled: false,
+                // Tauri needs a real index.html in frontendDist for release builds.
+                enabled: true,
+                routes: ["/"],
               },
             }
           : undefined
