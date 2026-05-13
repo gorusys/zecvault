@@ -19,10 +19,17 @@ use tauri::Manager;
 use tauri::Emitter;
 use zcash_client_backend::data_api::wallet::{
     ConfirmationsPolicy, SpendingKeys, TargetHeight, create_proposed_transactions,
-    propose_standard_transfer_to_address,
+    propose_shielding, propose_standard_transfer_to_address, propose_send_max_transfer,
 };
+use zcash_client_backend::data_api::wallet::input_selection::GreedyInputSelector;
 use zcash_client_backend::data_api::chain::{BlockCache, BlockSource};
-use zcash_client_backend::data_api::{Account as WalletAccount, AccountBirthday, AccountSource, InputSource, WalletRead, WalletWrite};
+use zcash_client_backend::data_api::{Account as WalletAccount, AccountBirthday, AccountSource, InputSource, MaxSpendMode, TransparentOutputFilter, WalletRead, WalletWrite};
+use zcash_client_backend::fees::standard::SingleOutputChangeStrategy;
+use zcash_client_backend::fees::DustOutputPolicy;
+use zcash_client_backend::wallet::WalletTransparentOutput;
+use transparent::address::Script as TScript;
+use transparent::bundle::{OutPoint, TxOut};
+use zcash_script::script;
 use zcash_client_backend::fees::StandardFeeRule;
 use tonic::transport::Channel;
 use zcash_client_backend::proto::compact_formats::CompactBlock;
@@ -33,12 +40,14 @@ use zcash_client_sqlite::util::SystemClock;
 use zcash_client_sqlite::wallet::init::init_wallet_db;
 use zcash_client_sqlite::WalletDb;
 use zcash_keys::address::Address as ZcashPoolAddress;
+use zcash_keys::encoding::AddressCodec;
 use zcash_keys::keys::{
     ReceiverRequirement, UnifiedAddressRequest, UnifiedFullViewingKey, UnifiedSpendingKey,
 };
 use zcash_proofs::prover::LocalTxProver;
 use zcash_protocol::ShieldedProtocol;
 use zcash_protocol::consensus::{BlockHeight, MAIN_NETWORK, TEST_NETWORK};
+use zcash_address::ZcashAddress;
 use zcash_protocol::memo::Memo;
 use zcash_protocol::value::Zatoshis;
 use zcash_protocol::TxId;
@@ -200,8 +209,13 @@ struct TxInfo {
     fee_zat: i64,
     to_address: Option<String>,
     from_address: Option<String>,
+    /// Decoded ZIP-302 memo text (UTF-8 only; empty/future memos produce None).
     memo: Option<String>,
     is_incoming: bool,
+    /// Receiving pools used: subset of "orchard", "sapling", "transparent".
+    pools: Vec<String>,
+    /// True for shielding transactions (transparent inputs → shielded outputs).
+    is_shielding: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -227,6 +241,21 @@ struct TransferProposalPayload {
     to: String,
     amount_zat: u64,
     memo: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TransferPreviewResult {
+    ok: bool,
+    error: Option<String>,
+    fee_zat: u64,
+    amount_zat: u64,
+    total_debit_zat: u64,
+    /// True when the send failed only because shielded balance is insufficient but
+    /// transparent balance would cover the shortfall.  The frontend should offer a
+    /// "Shield transparent funds" action before retrying.
+    #[serde(default)]
+    needs_shielding: bool,
 }
 
 const DEFAULT_LIGHTWALLETD_ENDPOINT: &str = "http://88.99.165.25:9067";
@@ -1289,6 +1318,24 @@ where
         sync_started.elapsed().as_millis()
     );
 
+    // Store transparent UTXOs fetched directly from lightwalletd so they appear in
+    // v_transactions (and therefore get_transactions) even before the historical block scan
+    // reaches the blocks that contain them.  This makes t-address receives visible in history
+    // immediately after wallet restore, rather than only after the full chain rescan finishes.
+    let taddr = wallet.transparent_address.trim().to_string();
+    if !taddr.is_empty() {
+        match fetch_and_store_transparent_utxos(&mut client, &mut db_data, &taddr).await {
+            Ok((count, zat)) => log::info!(
+                "sync transparent UTXO refresh: wallet={} stored={} zat={}",
+                wallet.wallet_fingerprint, count, zat
+            ),
+            Err(e) => log::warn!(
+                "sync transparent UTXO refresh failed (non-fatal): wallet={} err={}",
+                wallet.wallet_fingerprint, e
+            ),
+        }
+    }
+
     Ok(())
 }
 
@@ -1444,10 +1491,14 @@ fn wallet_restore(
     let path = wallet_store_file(&app)?;
     let mut store = read_wallet_store(&path)?;
     let resolved_password = resolve_wallet_password(&app, &mut store, password)?;
-    // When no birthday is given for a restore, default to the Sapling activation height rather
-    // than genesis so scanning is bounded to the shielded era. Users who know their wallet
-    // predates this or want a full sweep can pass birthdayHeight=0 explicitly from the UI.
-    let effective_birthday = birthday_height.unwrap_or_else(|| default_birthday_height(&network));
+    // Clamp birthday to at least the Sapling activation height — zcash_client_backend does not
+    // support scanning before Sapling (height 419200 on mainnet / 280000 on testnet).  When the
+    // caller passes 0 it means "scan from the beginning of the shielded era", which maps to the
+    // Sapling activation height.  Any value below that is silently raised.
+    let min_birthday = default_birthday_height(&network);
+    let effective_birthday = birthday_height
+        .map(|h| h.max(min_birthday))
+        .unwrap_or(min_birthday);
     let record = build_record(
         &normalized,
         &network,
@@ -1481,6 +1532,7 @@ async fn wallet_add_account(
     app: tauri::AppHandle,
     source_fingerprint: String,
     wallet_name: Option<String>,
+    birthday_height: Option<u32>,
 ) -> Result<WalletOpResponse, String> {
     let path = wallet_store_file(&app)?;
     let store = read_wallet_store(&path)?;
@@ -1516,8 +1568,13 @@ async fn wallet_add_account(
 
     let new_account_index = max_existing + 1;
 
-    // Use the current chain tip as birthday; this account has no history before now.
-    let birthday_height = fetch_chain_tip_for_birthday(&app, &source.network).await;
+    let min_birthday = default_birthday_height(&source.network);
+    let birthday_height = if let Some(h) = birthday_height {
+        h.max(min_birthday)
+    } else {
+        // Default: current chain tip — this account has no history before now.
+        fetch_chain_tip_for_birthday(&app, &source.network).await
+    };
 
     // Get the app password from in-memory state (same source wallet_plain_mnemonic uses)
     // so we can re-encrypt the mnemonic when storing the new account record.
@@ -1698,6 +1755,95 @@ fn wallet_update_name(
     Ok(WalletOpResponse {
         ok: snapshot.is_some(),
         snapshot,
+        error: None,
+    })
+}
+
+/// Update the birthday height for a wallet and wipe its local SQLite database so that the
+/// next sync re-downloads history from the new birthday.
+///
+/// Lowering the birthday causes a longer rescan but ensures pre-birthday transactions are found.
+/// Raising it shortens the rescan but may hide earlier transactions until a lower birthday is set.
+/// The new height is clamped to the Sapling activation height (419 200 mainnet / 280 000 testnet)
+/// so the wallet never tries to scan before shielded-note support exists.
+#[tauri::command]
+fn wallet_update_birthday(
+    app: tauri::AppHandle,
+    wallet_fingerprint: String,
+    birthday_height: u32,
+) -> Result<WalletOpResponse, String> {
+    let path = wallet_store_file(&app)?;
+    let mut store = read_wallet_store(&path)?;
+    ensure_app_unlocked(&app, &store)?;
+
+    // Find the target record first so we know its network for clamping.
+    let target_network = store
+        .wallets
+        .iter()
+        .find(|w| w.wallet_fingerprint == wallet_fingerprint)
+        .map(|w| w.network.clone())
+        .ok_or_else(|| "Wallet fingerprint not found.".to_string())?;
+
+    let min_birthday = default_birthday_height(&target_network);
+    let effective_birthday = birthday_height.max(min_birthday);
+
+    // Locate the DB key (seed fingerprint shared across all accounts from the same seed).
+    let db_key = store
+        .wallets
+        .iter()
+        .find(|w| w.wallet_fingerprint == wallet_fingerprint)
+        .map(|w| wallet_db_key(w).to_string())
+        .ok_or_else(|| "Wallet fingerprint not found.".to_string())?;
+
+    // Update the birthday_height on the specific wallet record.
+    let mut found = false;
+    let mut updated_snapshot: Option<WalletSnapshot> = None;
+    for wallet in &mut store.wallets {
+        if wallet.wallet_fingerprint == wallet_fingerprint {
+            wallet.birthday_height = effective_birthday;
+            updated_snapshot = Some(to_public_snapshot(wallet));
+            found = true;
+            break;
+        }
+    }
+    if !found {
+        return Ok(WalletOpResponse {
+            ok: false,
+            snapshot: None,
+            error: Some("Wallet fingerprint not found.".to_string()),
+        });
+    }
+
+    write_wallet_store(&path, &store)?;
+
+    // Delete the shared wallet SQLite DB so the next sync rebuilds it from the new birthday.
+    // All accounts from the same seed share one DB file; they will each recreate their own
+    // account entry during the next sync using their own birthday_height.
+    match wallet_data_db_path(&app, &db_key) {
+        Ok(db_path) => {
+            if db_path.exists() {
+                if let Err(e) = fs::remove_file(&db_path) {
+                    log::warn!(
+                        "[zecvault] wallet_update_birthday: could not delete wallet DB at {}: {} — \
+                         sync may start from old birthday until DB is manually removed",
+                        db_path.display(), e
+                    );
+                } else {
+                    log::info!(
+                        "[zecvault] wallet_update_birthday: deleted wallet DB for rescan (key={}, birthday={})",
+                        db_key, effective_birthday
+                    );
+                }
+            }
+        }
+        Err(e) => {
+            log::warn!("[zecvault] wallet_update_birthday: could not resolve DB path: {}", e);
+        }
+    }
+
+    Ok(WalletOpResponse {
+        ok: true,
+        snapshot: updated_snapshot,
         error: None,
     })
 }
@@ -2066,6 +2212,29 @@ async fn get_balance(app: tauri::AppHandle) -> Result<BalanceInfo, String> {
     Err("wallet balance read failed after retries".to_string())
 }
 
+/// Read the balance for any wallet by fingerprint without changing the active wallet.
+/// Returns zeroes when the wallet DB doesn't exist yet (pre-sync).
+#[tauri::command]
+async fn wallet_get_balance(
+    app: tauri::AppHandle,
+    wallet_fingerprint: String,
+) -> Result<BalanceInfo, String> {
+    let path = wallet_store_file(&app)?;
+    let store = read_wallet_store(&path)?;
+    ensure_app_unlocked(&app, &store)?;
+    let wallet = store
+        .wallets
+        .iter()
+        .find(|w| w.wallet_fingerprint == wallet_fingerprint)
+        .ok_or_else(|| "Wallet fingerprint not found.".to_string())?;
+    let data_db_path = wallet_data_db_path(&app, wallet_db_key(wallet))?;
+    match wallet.network.as_str() {
+        "mainnet" => read_wallet_balance_from_db(&data_db_path, MAIN_NETWORK, wallet.account_index),
+        "testnet" => read_wallet_balance_from_db(&data_db_path, TEST_NETWORK, wallet.account_index),
+        _ => Err("Unsupported network.".to_string()),
+    }
+}
+
 #[tauri::command]
 fn get_unified_address(app: tauri::AppHandle) -> Result<String, String> {
     let path = wallet_store_file(&app)?;
@@ -2073,6 +2242,938 @@ fn get_unified_address(app: tauri::AppHandle) -> Result<String, String> {
     ensure_app_unlocked(&app, &store)?;
     let wallet = active_wallet(&store).ok_or_else(|| "Wallet is not initialized.".to_string())?;
     Ok(wallet.unified_address.clone())
+}
+
+/// Fetch ALL confirmed transparent UTXOs for `taddr` from lightwalletd (start_height = 0 so
+/// historical UTXOs are included even when the wallet birthday is recent) and upsert them into
+/// the wallet DB.  This is necessary when the wallet was created / restored with a late birthday
+/// because the compact-block sync only fetches UTXOs from the birthday block onward.
+/// Returns `(stored_count, total_value_zat)` — the total value lets callers detect
+/// whether transparent funds are present without re-reading the wallet DB.
+async fn fetch_and_store_transparent_utxos<P>(
+    client: &mut CompactTxStreamerClient<Channel>,
+    db_data: &mut WalletDb<rusqlite::Connection, P, SystemClock, rand::rngs::OsRng>,
+    taddr: &str,
+) -> Result<(usize, u64), String>
+where
+    P: zcash_protocol::consensus::Parameters + Clone,
+{
+    if taddr.is_empty() {
+        return Ok((0, 0));
+    }
+    let reply = client
+        .get_address_utxos(service::GetAddressUtxosArg {
+            addresses: vec![taddr.to_string()],
+            start_height: 0,
+            max_entries: 2000,
+        })
+        .await
+        .map_err(|e| format!("GetAddressUtxos failed: {}", e))?
+        .into_inner();
+
+    let mut stored = 0usize;
+    let mut total_zat = 0u64;
+    for u in reply.address_utxos {
+        total_zat = total_zat.saturating_add(u.value_zat.max(0) as u64);
+        let txid_bytes: [u8; 32] = u.txid.as_slice().try_into()
+            .map_err(|_| "invalid txid length from lightwalletd".to_string())?;
+        let outpoint = OutPoint::new(txid_bytes, u.index.try_into().map_err(|_| "invalid utxo index".to_string())?);
+        let value = Zatoshis::from_nonnegative_i64(u.value_zat)
+            .map_err(|_| format!("invalid UTXO value: {}", u.value_zat))?;
+        let script = TScript(script::Code(u.script));
+        let txout = TxOut::new(value, script);
+        let height = zcash_protocol::consensus::BlockHeight::try_from(u.height)
+            .map_err(|_| format!("invalid UTXO height: {}", u.height))?;
+        if let Some(output) = WalletTransparentOutput::from_parts(outpoint, txout, Some(height)) {
+            if db_data.put_received_transparent_utxo(&output).is_ok() {
+                stored += 1;
+            }
+        }
+    }
+    log::info!("[zecvault] fetch_and_store_transparent_utxos: {} UTXOs ({} zat) for {}", stored, total_zat, taddr);
+    Ok((stored, total_zat))
+}
+
+/// Mirrors `sync::refresh_utxos` but always queries from block 0 so that transparent UTXOs
+/// received before the wallet birthday are included.  Uses wallet-registered receivers from
+/// `get_transparent_receivers` so that `put_received_transparent_utxo` can always find the
+/// matching address in the `addresses` table (avoiding `AddressNotRecognized` errors).
+async fn shield_store_utxos_from_genesis<P>(
+    client: &mut CompactTxStreamerClient<Channel>,
+    db_data: &mut WalletDb<rusqlite::Connection, P, SystemClock, rand::rngs::OsRng>,
+    params: &P,
+    account_id: <WalletDb<rusqlite::Connection, P, SystemClock, rand::rngs::OsRng> as WalletRead>::AccountId,
+) -> Result<(), String>
+where
+    P: zcash_protocol::consensus::Parameters + Clone,
+{
+    let receivers = db_data
+        .get_transparent_receivers(account_id, true, false)
+        .map_err(|e| format!("get_transparent_receivers failed: {}", e))?;
+
+    if receivers.is_empty() {
+        log::warn!("[zecvault] shield_store_utxos_from_genesis: no registered transparent receivers for account");
+        return Ok(());
+    }
+
+    let addrs: Vec<String> = receivers.keys().map(|a| a.encode(params)).collect();
+    log::info!("[zecvault] shield_store_utxos_from_genesis: querying {} receivers from height 0", addrs.len());
+
+    let reply = client
+        .get_address_utxos(service::GetAddressUtxosArg {
+            addresses: addrs,
+            start_height: 0,
+            max_entries: 2000,
+        })
+        .await
+        .map_err(|e| format!("GetAddressUtxos failed: {}", e))?
+        .into_inner();
+
+    let mut stored = 0usize;
+    let mut total_zat = 0u64;
+    let total_count = reply.address_utxos.len();
+    for u in &reply.address_utxos {
+        total_zat = total_zat.saturating_add(u.value_zat.max(0) as u64);
+    }
+    for u in reply.address_utxos {
+        let txid_bytes: [u8; 32] = match u.txid.as_slice().try_into() {
+            Ok(b) => b,
+            Err(_) => { log::warn!("[zecvault] shield: invalid txid length, skipping utxo"); continue; }
+        };
+        let index = match u.index.try_into() {
+            Ok(i) => i,
+            Err(_) => { log::warn!("[zecvault] shield: invalid utxo index, skipping"); continue; }
+        };
+        let value = match Zatoshis::from_nonnegative_i64(u.value_zat) {
+            Ok(v) => v,
+            Err(_) => { log::warn!("[zecvault] shield: invalid utxo value {}, skipping", u.value_zat); continue; }
+        };
+        let height = match zcash_protocol::consensus::BlockHeight::try_from(u.height) {
+            Ok(h) => h,
+            Err(_) => { log::warn!("[zecvault] shield: invalid utxo height {}, skipping", u.height); continue; }
+        };
+        let outpoint = OutPoint::new(txid_bytes, index);
+        let script = TScript(script::Code(u.script));
+        let txout = TxOut::new(value, script);
+        if let Some(output) = WalletTransparentOutput::from_parts(outpoint, txout, Some(height)) {
+            match db_data.put_received_transparent_utxo(&output) {
+                Ok(_) => stored += 1,
+                Err(e) => log::error!("[zecvault] shield put_received_transparent_utxo failed: {}", e),
+            }
+        }
+    }
+    log::info!(
+        "[zecvault] shield_store_utxos_from_genesis: stored {}/{} UTXOs ({} zat total)",
+        stored, total_count, total_zat
+    );
+    if total_zat == 0 {
+        return Err(
+            "No transparent UTXOs found on the network for this wallet. \
+             Make sure the transparent address has received confirmed funds and try again."
+                .to_string(),
+        );
+    }
+    if stored == 0 {
+        return Err(format!(
+            "Transparent UTXOs ({} zat) exist on the network but could not be indexed — \
+             this usually means the wallet needs a full sync first. \
+             Run a sync, then retry shielding.",
+            total_zat
+        ));
+    }
+    Ok(())
+}
+
+fn classify_proposal_error(e: &str) -> String {
+    let lower = e.to_lowercase();
+    if lower.contains("insufficient") || lower.contains("spendable") {
+        format!(
+            "Insufficient spendable balance. Try syncing first, wait for pending funds to confirm, or send a smaller amount. ({})",
+            e
+        )
+    } else if lower.contains("dust") || lower.contains("too small") {
+        "Amount is below the dust threshold. Try sending at least 0.00005 ZEC.".to_string()
+    } else if lower.contains("no spendable") || lower.contains("no notes") {
+        "No spendable notes found. The wallet may need to sync first.".to_string()
+    } else {
+        e.to_string()
+    }
+}
+
+/// Preview a transfer: refresh transparent UTXOs from lightwalletd, then run
+/// `propose_standard_transfer_to_address` to compute the real ZIP-317 fee.  The proposal
+/// is discarded — no transaction is built or broadcast.  Callers use the returned fee to
+/// show the review screen; the actual send runs a full sync + execute inside `execute_transfer`.
+#[tauri::command]
+async fn preview_transfer(
+    app: tauri::AppHandle,
+    to: String,
+    amount_zat: u64,
+    memo: Option<String>,
+) -> Result<TransferPreviewResult, String> {
+    let err_result = |msg: &str| {
+        Ok(TransferPreviewResult {
+            ok: false,
+            error: Some(msg.to_string()),
+            fee_zat: 0,
+            amount_zat,
+            total_debit_zat: 0,
+            needs_shielding: false,
+        })
+    };
+    if amount_zat == 0 {
+        return err_result("Amount must be greater than zero.");
+    }
+    let path = wallet_store_file(&app)?;
+    let store = read_wallet_store(&path)?;
+    ensure_app_unlocked(&app, &store)?;
+    let wallet = active_wallet(&store).ok_or_else(|| "Wallet is not initialized.".to_string())?.clone();
+    let to_trimmed = to.trim().to_string();
+
+    let memo_bytes = match memo.as_deref().filter(|m| !m.trim().is_empty()) {
+        Some(m) => match Memo::from_str(m.trim()).map(|memo| memo.encode()) {
+            Ok(b) => Some(b),
+            Err(e) => return err_result(&format!("Invalid memo: {}", e)),
+        },
+        None => None,
+    };
+
+    let data_db_path = wallet_data_db_path(&app, wallet_db_key(&wallet))?;
+
+    // Connect to lightwalletd so we can refresh transparent UTXOs before proposing.
+    // This ensures historical t-address UTXOs (received before wallet birthday) are visible.
+    let endpoint = normalize_grpc_endpoint(&load_lightwalletd_endpoint(&app)?);
+    let endpoint_candidates = lightwalletd_endpoint_candidates(&endpoint, wallet.network.as_str());
+    // If connection fails proceed without UTXO refresh — the proposal may still succeed from cached DB state.
+    let mut lwd_client_opt = probe_and_connect(&endpoint_candidates).await.ok().map(|(c, _)| c);
+
+    // Fetch transparent UTXOs from lightwalletd; also captures the total transparent value
+    // so we can detect needs_shielding without re-reading the wallet DB (which may not have
+    // transparent UTXOs indexed if they were received before the wallet birthday height).
+    let mut transparent_zat_from_network: u64 = 0;
+
+    let fee_result: Result<u64, String> = match wallet.network.as_str() {
+        "mainnet" => {
+            let decoded = zcash_keys::address::Address::decode(&MAIN_NETWORK, &to_trimmed);
+            if decoded.is_none() {
+                return err_result("Invalid recipient address for this wallet network (UA, Sapling, or transparent).");
+            }
+            let mut db_data = WalletDb::for_path(&data_db_path, MAIN_NETWORK, SystemClock, rand::rngs::OsRng)
+                .map_err(|e| format!("wallet db open failed: {}", e))?;
+            if let Some(ref mut c) = lwd_client_opt {
+                match fetch_and_store_transparent_utxos(c, &mut db_data, wallet.transparent_address.trim()).await {
+                    Ok((_, t_zat)) => transparent_zat_from_network = t_zat,
+                    Err(e) => log::warn!("[zecvault] preview transparent UTXO refresh failed (non-fatal): {}", e),
+                }
+            }
+            let (account_id, _) = find_wallet_account_id(&mut db_data, &wallet)?;
+            let to_addr = decoded.unwrap();
+            let amount = Zatoshis::from_u64(amount_zat).map_err(|e| format!("invalid amount: {}", e))?;
+            propose_standard_transfer_to_address::<_, _, std::convert::Infallible>(
+                &mut db_data,
+                &MAIN_NETWORK,
+                StandardFeeRule::Zip317,
+                account_id,
+                ConfirmationsPolicy::MIN,
+                &to_addr,
+                amount,
+                memo_bytes,
+                None,
+                ShieldedProtocol::Orchard,
+            )
+            .map(|p| p.steps().iter().map(|s| u64::from(s.balance().fee_required())).sum())
+            .map_err(|e| classify_proposal_error(&e.to_string()))
+        }
+        "testnet" => {
+            let decoded = zcash_keys::address::Address::decode(&TEST_NETWORK, &to_trimmed);
+            if decoded.is_none() {
+                return err_result("Invalid recipient address for this wallet network (UA, Sapling, or transparent).");
+            }
+            let mut db_data = WalletDb::for_path(&data_db_path, TEST_NETWORK, SystemClock, rand::rngs::OsRng)
+                .map_err(|e| format!("wallet db open failed: {}", e))?;
+            if let Some(ref mut c) = lwd_client_opt {
+                match fetch_and_store_transparent_utxos(c, &mut db_data, wallet.transparent_address.trim()).await {
+                    Ok((_, t_zat)) => transparent_zat_from_network = t_zat,
+                    Err(e) => log::warn!("[zecvault] preview transparent UTXO refresh failed (non-fatal): {}", e),
+                }
+            }
+            let (account_id, _) = find_wallet_account_id(&mut db_data, &wallet)?;
+            let to_addr = decoded.unwrap();
+            let amount = Zatoshis::from_u64(amount_zat).map_err(|e| format!("invalid amount: {}", e))?;
+            propose_standard_transfer_to_address::<_, _, std::convert::Infallible>(
+                &mut db_data,
+                &TEST_NETWORK,
+                StandardFeeRule::Zip317,
+                account_id,
+                ConfirmationsPolicy::MIN,
+                &to_addr,
+                amount,
+                memo_bytes,
+                None,
+                ShieldedProtocol::Orchard,
+            )
+            .map(|p| p.steps().iter().map(|s| u64::from(s.balance().fee_required())).sum())
+            .map_err(|e| classify_proposal_error(&e.to_string()))
+        }
+        _ => return Err("Unsupported network. Use mainnet or testnet.".to_string()),
+    };
+
+    match fee_result {
+        Ok(fee_zat) => Ok(TransferPreviewResult {
+            ok: true,
+            error: None,
+            fee_zat,
+            amount_zat,
+            total_debit_zat: amount_zat + fee_zat,
+            needs_shielding: false,
+        }),
+        Err(e) => {
+            // If the shielded pool alone is insufficient but transparent funds from the
+            // network cover the gap, the user needs to shield before sending.
+            // We use the value returned directly by GetAddressUtxos (not the DB) so this
+            // works even when UTXOs pre-date the wallet birthday and aren't in local state.
+            let shielded_from_db = match wallet.network.as_str() {
+                "testnet" => read_wallet_balance_from_db(&data_db_path, TEST_NETWORK, wallet.account_index),
+                _ => read_wallet_balance_from_db(&data_db_path, MAIN_NETWORK, wallet.account_index),
+            }
+            .map(|b| b.orchard_zat.saturating_add(b.sapling_zat))
+            .unwrap_or(0);
+            // Don't prompt shielding for t→t sends: if the recipient is transparent
+            // the library can route directly without shielding first.
+            let is_transparent_recipient = match wallet.network.as_str() {
+                "testnet" => ZcashPoolAddress::decode(&TEST_NETWORK, &to_trimmed),
+                _ => ZcashPoolAddress::decode(&MAIN_NETWORK, &to_trimmed),
+            }
+            .map(|a| matches!(a, ZcashPoolAddress::Transparent(_)))
+            .unwrap_or(false);
+            let needs_shielding = e.to_lowercase().contains("insufficient")
+                && transparent_zat_from_network > 0
+                && shielded_from_db.saturating_add(transparent_zat_from_network) >= amount_zat
+                && !is_transparent_recipient;
+            log::info!(
+                "[zecvault] preview_transfer failed: needs_shielding={} shielded_db={} transparent_net={} amount={}",
+                needs_shielding, shielded_from_db, transparent_zat_from_network, amount_zat
+            );
+            Ok(TransferPreviewResult {
+                ok: false,
+                error: Some(if needs_shielding {
+                    "Your transparent balance can cover this amount, but transparent funds must be moved to the private Orchard pool first. Use 'Shield transparent funds' below, then retry the send.".to_string()
+                } else {
+                    e
+                }),
+                fee_zat: 0,
+                amount_zat,
+                total_debit_zat: 0,
+                needs_shielding,
+            })
+        }
+    }
+}
+
+#[tauri::command]
+async fn shield_transparent_funds(
+    app: tauri::AppHandle,
+    target_pool: Option<String>,
+) -> Result<String, String> {
+    let path = wallet_store_file(&app)?;
+    let store = read_wallet_store(&path)?;
+    ensure_app_unlocked(&app, &store)?;
+    let wallet = active_wallet(&store)
+        .ok_or_else(|| "Wallet is not initialized.".to_string())?
+        .clone();
+
+    let taddr_str = wallet.transparent_address.trim().to_string();
+    if taddr_str.is_empty() {
+        return Err("No transparent address on this wallet.".to_string());
+    }
+
+    // Orchard is always the default; Sapling is an explicit opt-in for legacy interop.
+    let shield_pool = match target_pool.as_deref() {
+        Some("sapling") => ShieldedProtocol::Sapling,
+        _ => ShieldedProtocol::Orchard,
+    };
+
+    let mnemonic = wallet_plain_mnemonic(&app, &store, &wallet)?;
+    let seed = Mnemonic::parse_in_normalized(Language::English, &mnemonic)
+        .map_err(|e| format!("mnemonic parse failed: {}", e))?
+        .to_seed("");
+
+    let endpoint = normalize_grpc_endpoint(&load_lightwalletd_endpoint(&app)?);
+    let endpoint_candidates = lightwalletd_endpoint_candidates(&endpoint, wallet.network.as_str());
+    let (client, tip_height) = probe_and_connect(&endpoint_candidates).await?;
+
+    let _sync_guard = LIGHTWALLETD_SYNC_LOCK.lock().await;
+
+    let txid = match wallet.network.as_str() {
+        "mainnet" => {
+            let ta = match ZcashPoolAddress::decode(&MAIN_NETWORK, &taddr_str) {
+                Some(ZcashPoolAddress::Transparent(ta)) => ta,
+                _ => return Err(format!("Could not decode transparent address: {}", taddr_str)),
+            };
+            sync_wallet_for_network(MAIN_NETWORK, &app, &wallet, &seed, client.clone(), tip_height).await?;
+            let data_db_path = wallet_data_db_path(&app, wallet_db_key(&wallet))?;
+            let mut db_data = WalletDb::for_path(&data_db_path, MAIN_NETWORK, SystemClock, rand::rngs::OsRng)
+                .map_err(|e| format!("wallet db open failed: {}", e))?;
+            let (account_id, account_index) = find_wallet_account_id(&mut db_data, &wallet)?;
+            // Fetch transparent UTXOs from genesis using the wallet-registered receivers.
+            // This mirrors sync::refresh_utxos but always starts from height 0 so pre-birthday
+            // UTXOs (not picked up by the standard sync) are also stored.
+            let mut lwd_client = client.clone();
+            shield_store_utxos_from_genesis(&mut lwd_client, &mut db_data, &MAIN_NETWORK, account_id).await?;
+            let shield_proposal = propose_shielding::<_, _, _, _, std::convert::Infallible>(
+                &mut db_data,
+                &MAIN_NETWORK,
+                &GreedyInputSelector::new(),
+                &SingleOutputChangeStrategy::new(
+                    StandardFeeRule::Zip317,
+                    None,
+                    shield_pool,
+                    DustOutputPolicy::default(),
+                ),
+                Zatoshis::ZERO,
+                &[ta],
+                account_id,
+                ConfirmationsPolicy::MIN,
+                TransparentOutputFilter::All,
+            )
+            .map_err(|e| format!("shielding proposal failed: {}", e))?;
+            let usk = UnifiedSpendingKey::from_seed(&MAIN_NETWORK, &seed, account_index)
+                .map_err(|e| format!("spending key derivation failed: {}", e))?;
+            let prover = LocalTxProver::bundled();
+            let txids = create_proposed_transactions::<
+                _,
+                _,
+                std::convert::Infallible,
+                _,
+                std::convert::Infallible,
+                _,
+            >(
+                &mut db_data,
+                &MAIN_NETWORK,
+                &prover,
+                &prover,
+                &SpendingKeys::from_unified_spending_key(usk),
+                OvkPolicy::Sender,
+                &shield_proposal,
+            )
+            .map_err(|e| format!("shielding transaction creation failed: {}", e))?;
+            let txid = txids.first();
+            let tx = db_data
+                .get_transaction(*txid)
+                .map_err(|e| format!("stored shielding tx lookup failed: {}", e))?
+                .ok_or_else(|| "Shielding transaction not found in wallet db.".to_string())?;
+            let mut raw_tx = Vec::new();
+            tx.write(&mut raw_tx)
+                .map_err(|e| format!("shielding tx serialization failed: {}", e))?;
+            let mut broadcast_client = client.clone();
+            let send_resp = broadcast_client
+                .send_transaction(service::RawTransaction { data: raw_tx, height: 0 })
+                .await
+                .map_err(|e| format!("shielding broadcast failed: {}", e))?
+                .into_inner();
+            if send_resp.error_code != 0 {
+                return Err(format!("shielding broadcast rejected: {}", send_resp.error_message));
+            }
+            log::info!(
+                "shield_transparent_funds broadcasted: wallet={} network=mainnet txid={}",
+                wallet.wallet_fingerprint, txid
+            );
+            txid.to_string()
+        }
+        "testnet" => {
+            let ta = match ZcashPoolAddress::decode(&TEST_NETWORK, &taddr_str) {
+                Some(ZcashPoolAddress::Transparent(ta)) => ta,
+                _ => return Err(format!("Could not decode transparent address: {}", taddr_str)),
+            };
+            sync_wallet_for_network(TEST_NETWORK, &app, &wallet, &seed, client.clone(), tip_height).await?;
+            let data_db_path = wallet_data_db_path(&app, wallet_db_key(&wallet))?;
+            let mut db_data = WalletDb::for_path(&data_db_path, TEST_NETWORK, SystemClock, rand::rngs::OsRng)
+                .map_err(|e| format!("wallet db open failed: {}", e))?;
+            let (account_id, account_index) = find_wallet_account_id(&mut db_data, &wallet)?;
+            let mut lwd_client = client.clone();
+            shield_store_utxos_from_genesis(&mut lwd_client, &mut db_data, &TEST_NETWORK, account_id).await?;
+            let shield_proposal = propose_shielding::<_, _, _, _, std::convert::Infallible>(
+                &mut db_data,
+                &TEST_NETWORK,
+                &GreedyInputSelector::new(),
+                &SingleOutputChangeStrategy::new(
+                    StandardFeeRule::Zip317,
+                    None,
+                    shield_pool,
+                    DustOutputPolicy::default(),
+                ),
+                Zatoshis::ZERO,
+                &[ta],
+                account_id,
+                ConfirmationsPolicy::MIN,
+                TransparentOutputFilter::All,
+            )
+            .map_err(|e| format!("shielding proposal failed: {}", e))?;
+            let usk = UnifiedSpendingKey::from_seed(&TEST_NETWORK, &seed, account_index)
+                .map_err(|e| format!("spending key derivation failed: {}", e))?;
+            let prover = LocalTxProver::bundled();
+            let txids = create_proposed_transactions::<
+                _,
+                _,
+                std::convert::Infallible,
+                _,
+                std::convert::Infallible,
+                _,
+            >(
+                &mut db_data,
+                &TEST_NETWORK,
+                &prover,
+                &prover,
+                &SpendingKeys::from_unified_spending_key(usk),
+                OvkPolicy::Sender,
+                &shield_proposal,
+            )
+            .map_err(|e| format!("shielding transaction creation failed: {}", e))?;
+            let txid = txids.first();
+            let tx = db_data
+                .get_transaction(*txid)
+                .map_err(|e| format!("stored shielding tx lookup failed: {}", e))?
+                .ok_or_else(|| "Shielding transaction not found in wallet db.".to_string())?;
+            let mut raw_tx = Vec::new();
+            tx.write(&mut raw_tx)
+                .map_err(|e| format!("shielding tx serialization failed: {}", e))?;
+            let mut broadcast_client = client.clone();
+            let send_resp = broadcast_client
+                .send_transaction(service::RawTransaction { data: raw_tx, height: 0 })
+                .await
+                .map_err(|e| format!("shielding broadcast failed: {}", e))?
+                .into_inner();
+            if send_resp.error_code != 0 {
+                return Err(format!("shielding broadcast rejected: {}", send_resp.error_message));
+            }
+            log::info!(
+                "shield_transparent_funds broadcasted: wallet={} network=testnet txid={}",
+                wallet.wallet_fingerprint, txid
+            );
+            txid.to_string()
+        }
+        _ => return Err("Unsupported network. Use mainnet or testnet.".to_string()),
+    };
+
+    Ok(txid)
+}
+
+/// Returns the ZIP-317 fee and spendable maximum for a send-all transfer.
+/// Does not sync; uses current DB state. Pool order: Orchard first, then Sapling.
+#[tauri::command]
+async fn preview_send_max(
+    app: tauri::AppHandle,
+    to: String,
+    memo: Option<String>,
+) -> Result<TransferPreviewResult, String> {
+    let err_result = |msg: &str| {
+        Ok(TransferPreviewResult {
+            ok: false,
+            error: Some(msg.to_string()),
+            fee_zat: 0,
+            amount_zat: 0,
+            total_debit_zat: 0,
+            needs_shielding: false,
+        })
+    };
+    let path = wallet_store_file(&app)?;
+    let store = read_wallet_store(&path)?;
+    ensure_app_unlocked(&app, &store)?;
+    let wallet = active_wallet(&store).ok_or_else(|| "Wallet is not initialized.".to_string())?.clone();
+    let to_trimmed = to.trim().to_string();
+    let recipient = match ZcashAddress::try_from_encoded(&to_trimmed) {
+        Ok(a) => a,
+        Err(e) => return err_result(&format!("Invalid recipient address: {}", e)),
+    };
+    let memo_bytes = match memo.as_deref().filter(|m| !m.trim().is_empty()) {
+        Some(m) => match Memo::from_str(m.trim()).map(|memo| memo.encode()) {
+            Ok(b) => Some(b),
+            Err(e) => return err_result(&format!("Invalid memo: {}", e)),
+        },
+        None => None,
+    };
+    let data_db_path = wallet_data_db_path(&app, wallet_db_key(&wallet))?;
+    if !data_db_path.exists() {
+        return err_result("Wallet database not found. Please sync first.");
+    }
+    // Orchard-first spend pool ordering — never defaults to transparent (transparent needs shielding).
+    let spend_pools = &[ShieldedProtocol::Orchard, ShieldedProtocol::Sapling];
+    let fee_result: Result<(u64, u64), String> = match wallet.network.as_str() {
+        "mainnet" => {
+            let mut db_data = WalletDb::for_path(&data_db_path, MAIN_NETWORK, SystemClock, rand::rngs::OsRng)
+                .map_err(|e| format!("wallet db open failed: {}", e))?;
+            let (account_id, _) = find_wallet_account_id(&mut db_data, &wallet)?;
+            let proposal = propose_send_max_transfer::<_, _, _, std::convert::Infallible>(
+                &mut db_data,
+                &MAIN_NETWORK,
+                account_id,
+                spend_pools,
+                &StandardFeeRule::Zip317,
+                recipient,
+                memo_bytes,
+                MaxSpendMode::MaxSpendable,
+                ConfirmationsPolicy::MIN,
+            )
+            .map_err(|e| format!("send-max proposal failed: {}", e))?;
+            let fee: u64 = proposal.steps().iter().map(|s| u64::from(s.balance().fee_required())).sum();
+            // amount_to_recipient = total_inputs - fee - any residual change outputs
+            let total_in: u64 = proposal.steps().iter().map(|s| u64::from(s.balance().total())).sum();
+            let change_sum: u64 = proposal.steps().iter().map(|s| {
+                s.balance().proposed_change().iter()
+                    .filter(|c| !c.is_ephemeral())
+                    .map(|c| u64::from(c.value()))
+                    .sum::<u64>()
+            }).sum();
+            let amount = total_in.saturating_sub(fee).saturating_sub(change_sum);
+            Ok((fee, amount))
+        }
+        "testnet" => {
+            let mut db_data = WalletDb::for_path(&data_db_path, TEST_NETWORK, SystemClock, rand::rngs::OsRng)
+                .map_err(|e| format!("wallet db open failed: {}", e))?;
+            let (account_id, _) = find_wallet_account_id(&mut db_data, &wallet)?;
+            // Re-parse the address for testnet (ZcashAddress is move-consumed above)
+            let recipient2 = ZcashAddress::try_from_encoded(&to_trimmed)
+                .map_err(|e| format!("Invalid recipient address: {}", e))?;
+            let proposal = propose_send_max_transfer::<_, _, _, std::convert::Infallible>(
+                &mut db_data,
+                &TEST_NETWORK,
+                account_id,
+                spend_pools,
+                &StandardFeeRule::Zip317,
+                recipient2,
+                memo_bytes,
+                MaxSpendMode::MaxSpendable,
+                ConfirmationsPolicy::MIN,
+            )
+            .map_err(|e| format!("send-max proposal failed: {}", e))?;
+            let fee: u64 = proposal.steps().iter().map(|s| u64::from(s.balance().fee_required())).sum();
+            let total_in: u64 = proposal.steps().iter().map(|s| u64::from(s.balance().total())).sum();
+            let change_sum: u64 = proposal.steps().iter().map(|s| {
+                s.balance().proposed_change().iter()
+                    .filter(|c| !c.is_ephemeral())
+                    .map(|c| u64::from(c.value()))
+                    .sum::<u64>()
+            }).sum();
+            let amount = total_in.saturating_sub(fee).saturating_sub(change_sum);
+            Ok((fee, amount))
+        }
+        _ => Err("Unsupported network.".to_string()),
+    };
+    match fee_result {
+        Ok((fee_zat, amount_zat)) => Ok(TransferPreviewResult {
+            ok: true,
+            error: None,
+            fee_zat,
+            amount_zat,
+            total_debit_zat: amount_zat + fee_zat,
+            needs_shielding: false,
+        }),
+        Err(e) => err_result(&e),
+    }
+}
+
+/// Drain all spendable shielded funds (Orchard first, then Sapling) to a single recipient.
+/// Syncs before proposing to ensure accurate balance.
+#[tauri::command]
+async fn send_max_transfer(
+    app: tauri::AppHandle,
+    to: String,
+    memo: Option<String>,
+) -> Result<String, String> {
+    let path = wallet_store_file(&app)?;
+    let store = read_wallet_store(&path)?;
+    ensure_app_unlocked(&app, &store)?;
+    let wallet = active_wallet(&store).ok_or_else(|| "Wallet is not initialized.".to_string())?.clone();
+    let to_trimmed = to.trim().to_string();
+    let memo_bytes = if let Some(m) = memo.as_deref().filter(|m| !m.trim().is_empty()) {
+        Some(Memo::from_str(m.trim()).map_err(|e| format!("invalid memo: {}", e))?.encode())
+    } else {
+        None
+    };
+    let mnemonic = wallet_plain_mnemonic(&app, &store, &wallet)?;
+    let seed = Mnemonic::parse_in_normalized(Language::English, &mnemonic)
+        .map_err(|e| format!("mnemonic parse failed: {}", e))?
+        .to_seed("");
+    let endpoint = normalize_grpc_endpoint(&load_lightwalletd_endpoint(&app)?);
+    let endpoint_candidates = lightwalletd_endpoint_candidates(&endpoint, wallet.network.as_str());
+    let (client, tip_height) = probe_and_connect(&endpoint_candidates).await?;
+
+    let _sync_guard = LIGHTWALLETD_SYNC_LOCK.lock().await;
+
+    let spend_pools = &[ShieldedProtocol::Orchard, ShieldedProtocol::Sapling];
+    let txid = match wallet.network.as_str() {
+        "mainnet" => {
+            let recipient = ZcashAddress::try_from_encoded(&to_trimmed)
+                .map_err(|e| format!("Invalid recipient address: {}", e))?;
+            sync_wallet_for_network(MAIN_NETWORK, &app, &wallet, &seed, client.clone(), tip_height).await?;
+            let data_db_path = wallet_data_db_path(&app, wallet_db_key(&wallet))?;
+            let mut db_data = WalletDb::for_path(&data_db_path, MAIN_NETWORK, SystemClock, rand::rngs::OsRng)
+                .map_err(|e| format!("wallet db open failed: {}", e))?;
+            let (account_id, account_index) = find_wallet_account_id(&mut db_data, &wallet)?;
+            let tx_proposal = propose_send_max_transfer::<_, _, _, std::convert::Infallible>(
+                &mut db_data,
+                &MAIN_NETWORK,
+                account_id,
+                spend_pools,
+                &StandardFeeRule::Zip317,
+                recipient,
+                memo_bytes,
+                MaxSpendMode::MaxSpendable,
+                ConfirmationsPolicy::MIN,
+            )
+            .map_err(|e| format!("send-max proposal failed: {}", e))?;
+            let usk = UnifiedSpendingKey::from_seed(&MAIN_NETWORK, &seed, account_index)
+                .map_err(|e| format!("spending key derivation failed: {}", e))?;
+            let prover = LocalTxProver::bundled();
+            let txids = create_proposed_transactions::<
+                _,
+                _,
+                std::convert::Infallible,
+                _,
+                std::convert::Infallible,
+                _,
+            >(
+                &mut db_data,
+                &MAIN_NETWORK,
+                &prover,
+                &prover,
+                &SpendingKeys::from_unified_spending_key(usk),
+                OvkPolicy::Sender,
+                &tx_proposal,
+            )
+            .map_err(|e| format!("send-max transaction creation failed: {}", e))?;
+            let txid = txids.first();
+            let tx = db_data.get_transaction(*txid)
+                .map_err(|e| format!("send-max tx lookup failed: {}", e))?
+                .ok_or_else(|| "Send-max transaction not found in wallet db.".to_string())?;
+            let mut raw_tx = Vec::new();
+            tx.write(&mut raw_tx).map_err(|e| format!("send-max tx serialization failed: {}", e))?;
+            let mut bc = client.clone();
+            let resp = bc.send_transaction(service::RawTransaction { data: raw_tx, height: 0 })
+                .await
+                .map_err(|e| format!("send-max broadcast failed: {}", e))?
+                .into_inner();
+            if resp.error_code != 0 {
+                return Err(format!("send-max broadcast rejected: {}", resp.error_message));
+            }
+            log::info!("send_max_transfer broadcasted: wallet={} txid={}", wallet.wallet_fingerprint, txid);
+            txid.to_string()
+        }
+        "testnet" => {
+            let recipient = ZcashAddress::try_from_encoded(&to_trimmed)
+                .map_err(|e| format!("Invalid recipient address: {}", e))?;
+            sync_wallet_for_network(TEST_NETWORK, &app, &wallet, &seed, client.clone(), tip_height).await?;
+            let data_db_path = wallet_data_db_path(&app, wallet_db_key(&wallet))?;
+            let mut db_data = WalletDb::for_path(&data_db_path, TEST_NETWORK, SystemClock, rand::rngs::OsRng)
+                .map_err(|e| format!("wallet db open failed: {}", e))?;
+            let (account_id, account_index) = find_wallet_account_id(&mut db_data, &wallet)?;
+            let tx_proposal = propose_send_max_transfer::<_, _, _, std::convert::Infallible>(
+                &mut db_data,
+                &TEST_NETWORK,
+                account_id,
+                spend_pools,
+                &StandardFeeRule::Zip317,
+                recipient,
+                memo_bytes,
+                MaxSpendMode::MaxSpendable,
+                ConfirmationsPolicy::MIN,
+            )
+            .map_err(|e| format!("send-max proposal failed: {}", e))?;
+            let usk = UnifiedSpendingKey::from_seed(&TEST_NETWORK, &seed, account_index)
+                .map_err(|e| format!("spending key derivation failed: {}", e))?;
+            let prover = LocalTxProver::bundled();
+            let txids = create_proposed_transactions::<
+                _,
+                _,
+                std::convert::Infallible,
+                _,
+                std::convert::Infallible,
+                _,
+            >(
+                &mut db_data,
+                &TEST_NETWORK,
+                &prover,
+                &prover,
+                &SpendingKeys::from_unified_spending_key(usk),
+                OvkPolicy::Sender,
+                &tx_proposal,
+            )
+            .map_err(|e| format!("send-max transaction creation failed: {}", e))?;
+            let txid = txids.first();
+            let tx = db_data.get_transaction(*txid)
+                .map_err(|e| format!("send-max tx lookup failed: {}", e))?
+                .ok_or_else(|| "Send-max transaction not found in wallet db.".to_string())?;
+            let mut raw_tx = Vec::new();
+            tx.write(&mut raw_tx).map_err(|e| format!("send-max tx serialization failed: {}", e))?;
+            let mut bc = client.clone();
+            let resp = bc.send_transaction(service::RawTransaction { data: raw_tx, height: 0 })
+                .await
+                .map_err(|e| format!("send-max broadcast failed: {}", e))?
+                .into_inner();
+            if resp.error_code != 0 {
+                return Err(format!("send-max broadcast rejected: {}", resp.error_message));
+            }
+            log::info!("send_max_transfer broadcasted: wallet={} txid={}", wallet.wallet_fingerprint, txid);
+            txid.to_string()
+        }
+        _ => return Err("Unsupported network.".to_string()),
+    };
+    Ok(txid)
+}
+
+/// Move all spendable Sapling funds into the Orchard pool via a self-send.
+/// Errors clearly if there is no Sapling balance.
+#[tauri::command]
+async fn migrate_sapling_to_orchard(app: tauri::AppHandle) -> Result<String, String> {
+    let path = wallet_store_file(&app)?;
+    let store = read_wallet_store(&path)?;
+    ensure_app_unlocked(&app, &store)?;
+    let wallet = active_wallet(&store).ok_or_else(|| "Wallet is not initialized.".to_string())?.clone();
+    let orchard_ua = wallet.orchard_unified_address.trim().to_string();
+    if orchard_ua.is_empty() {
+        return Err("No Orchard unified address on this wallet.".to_string());
+    }
+    let recipient = ZcashAddress::try_from_encoded(&orchard_ua)
+        .map_err(|e| format!("Invalid Orchard address: {}", e))?;
+    let mnemonic = wallet_plain_mnemonic(&app, &store, &wallet)?;
+    let seed = Mnemonic::parse_in_normalized(Language::English, &mnemonic)
+        .map_err(|e| format!("mnemonic parse failed: {}", e))?
+        .to_seed("");
+    let endpoint = normalize_grpc_endpoint(&load_lightwalletd_endpoint(&app)?);
+    let endpoint_candidates = lightwalletd_endpoint_candidates(&endpoint, wallet.network.as_str());
+    let (client, tip_height) = probe_and_connect(&endpoint_candidates).await?;
+
+    let _sync_guard = LIGHTWALLETD_SYNC_LOCK.lock().await;
+
+    let spend_pools = &[ShieldedProtocol::Sapling];
+    let txid = match wallet.network.as_str() {
+        "mainnet" => {
+            sync_wallet_for_network(MAIN_NETWORK, &app, &wallet, &seed, client.clone(), tip_height).await?;
+            let data_db_path = wallet_data_db_path(&app, wallet_db_key(&wallet))?;
+            let mut db_data = WalletDb::for_path(&data_db_path, MAIN_NETWORK, SystemClock, rand::rngs::OsRng)
+                .map_err(|e| format!("wallet db open failed: {}", e))?;
+            let (account_id, account_index) = find_wallet_account_id(&mut db_data, &wallet)?;
+            let tx_proposal = propose_send_max_transfer::<_, _, _, std::convert::Infallible>(
+                &mut db_data,
+                &MAIN_NETWORK,
+                account_id,
+                spend_pools,
+                &StandardFeeRule::Zip317,
+                recipient,
+                None,
+                MaxSpendMode::MaxSpendable,
+                ConfirmationsPolicy::MIN,
+            )
+            .map_err(|e| {
+                if e.to_string().to_lowercase().contains("no spendable") || e.to_string().to_lowercase().contains("insufficient") {
+                    "No spendable Sapling balance to migrate.".to_string()
+                } else {
+                    format!("migration proposal failed: {}", e)
+                }
+            })?;
+            let usk = UnifiedSpendingKey::from_seed(&MAIN_NETWORK, &seed, account_index)
+                .map_err(|e| format!("spending key derivation failed: {}", e))?;
+            let prover = LocalTxProver::bundled();
+            let txids = create_proposed_transactions::<
+                _,
+                _,
+                std::convert::Infallible,
+                _,
+                std::convert::Infallible,
+                _,
+            >(
+                &mut db_data,
+                &MAIN_NETWORK,
+                &prover,
+                &prover,
+                &SpendingKeys::from_unified_spending_key(usk),
+                OvkPolicy::Sender,
+                &tx_proposal,
+            )
+            .map_err(|e| format!("migration transaction creation failed: {}", e))?;
+            let txid = txids.first();
+            let tx = db_data.get_transaction(*txid)
+                .map_err(|e| format!("migration tx lookup failed: {}", e))?
+                .ok_or_else(|| "Migration transaction not found in wallet db.".to_string())?;
+            let mut raw_tx = Vec::new();
+            tx.write(&mut raw_tx).map_err(|e| format!("migration tx serialization failed: {}", e))?;
+            let mut bc = client.clone();
+            let resp = bc.send_transaction(service::RawTransaction { data: raw_tx, height: 0 })
+                .await
+                .map_err(|e| format!("migration broadcast failed: {}", e))?
+                .into_inner();
+            if resp.error_code != 0 {
+                return Err(format!("migration broadcast rejected: {}", resp.error_message));
+            }
+            log::info!("migrate_sapling_to_orchard broadcasted: wallet={} txid={}", wallet.wallet_fingerprint, txid);
+            txid.to_string()
+        }
+        "testnet" => {
+            let recipient2 = ZcashAddress::try_from_encoded(&orchard_ua)
+                .map_err(|e| format!("Invalid Orchard address: {}", e))?;
+            sync_wallet_for_network(TEST_NETWORK, &app, &wallet, &seed, client.clone(), tip_height).await?;
+            let data_db_path = wallet_data_db_path(&app, wallet_db_key(&wallet))?;
+            let mut db_data = WalletDb::for_path(&data_db_path, TEST_NETWORK, SystemClock, rand::rngs::OsRng)
+                .map_err(|e| format!("wallet db open failed: {}", e))?;
+            let (account_id, account_index) = find_wallet_account_id(&mut db_data, &wallet)?;
+            let tx_proposal = propose_send_max_transfer::<_, _, _, std::convert::Infallible>(
+                &mut db_data,
+                &TEST_NETWORK,
+                account_id,
+                spend_pools,
+                &StandardFeeRule::Zip317,
+                recipient2,
+                None,
+                MaxSpendMode::MaxSpendable,
+                ConfirmationsPolicy::MIN,
+            )
+            .map_err(|e| {
+                if e.to_string().to_lowercase().contains("no spendable") || e.to_string().to_lowercase().contains("insufficient") {
+                    "No spendable Sapling balance to migrate.".to_string()
+                } else {
+                    format!("migration proposal failed: {}", e)
+                }
+            })?;
+            let usk = UnifiedSpendingKey::from_seed(&TEST_NETWORK, &seed, account_index)
+                .map_err(|e| format!("spending key derivation failed: {}", e))?;
+            let prover = LocalTxProver::bundled();
+            let txids = create_proposed_transactions::<
+                _,
+                _,
+                std::convert::Infallible,
+                _,
+                std::convert::Infallible,
+                _,
+            >(
+                &mut db_data,
+                &TEST_NETWORK,
+                &prover,
+                &prover,
+                &SpendingKeys::from_unified_spending_key(usk),
+                OvkPolicy::Sender,
+                &tx_proposal,
+            )
+            .map_err(|e| format!("migration transaction creation failed: {}", e))?;
+            let txid = txids.first();
+            let tx = db_data.get_transaction(*txid)
+                .map_err(|e| format!("migration tx lookup failed: {}", e))?
+                .ok_or_else(|| "Migration transaction not found in wallet db.".to_string())?;
+            let mut raw_tx = Vec::new();
+            tx.write(&mut raw_tx).map_err(|e| format!("migration tx serialization failed: {}", e))?;
+            let mut bc = client.clone();
+            let resp = bc.send_transaction(service::RawTransaction { data: raw_tx, height: 0 })
+                .await
+                .map_err(|e| format!("migration broadcast failed: {}", e))?
+                .into_inner();
+            if resp.error_code != 0 {
+                return Err(format!("migration broadcast rejected: {}", resp.error_message));
+            }
+            log::info!("migrate_sapling_to_orchard broadcasted: wallet={} txid={}", wallet.wallet_fingerprint, txid);
+            txid.to_string()
+        }
+        _ => return Err("Unsupported network.".to_string()),
+    };
+    Ok(txid)
 }
 
 #[tauri::command]
@@ -2152,10 +3253,15 @@ async fn execute_transfer(app: tauri::AppHandle, proposal_json: String) -> Resul
     match wallet.network.as_str() {
         "mainnet" => {
             let mut broadcast_client = client.clone();
-            sync_wallet_for_network(MAIN_NETWORK, &app, wallet, &seed, client, tip_height).await?;
+            sync_wallet_for_network(MAIN_NETWORK, &app, wallet, &seed, client.clone(), tip_height).await?;
             let data_db_path = wallet_data_db_path(&app, wallet_db_key(wallet))?;
             let mut db_data = WalletDb::for_path(&data_db_path, MAIN_NETWORK, SystemClock, rand::rngs::OsRng)
                 .map_err(|e| format!("wallet db open failed: {}", e))?;
+            // Refresh transparent UTXOs from lightwalletd unconditionally (start_height=0) so that
+            // UTXOs received before the wallet birthday are available for the spend proposal.
+            if let Err(e) = fetch_and_store_transparent_utxos(&mut broadcast_client, &mut db_data, wallet.transparent_address.trim()).await.map(|_| ()) {
+                log::warn!("[zecvault] transparent UTXO refresh failed (non-fatal): {}", e);
+            }
             let (account_id, account_index) = find_wallet_account_id(&mut db_data, wallet)?;
             let to = zcash_keys::address::Address::decode(&MAIN_NETWORK, proposal.to.trim())
                 .ok_or_else(|| "Invalid recipient address.".to_string())?;
@@ -2242,10 +3348,13 @@ async fn execute_transfer(app: tauri::AppHandle, proposal_json: String) -> Resul
         }
         "testnet" => {
             let mut broadcast_client = client.clone();
-            sync_wallet_for_network(TEST_NETWORK, &app, wallet, &seed, client, tip_height).await?;
+            sync_wallet_for_network(TEST_NETWORK, &app, wallet, &seed, client.clone(), tip_height).await?;
             let data_db_path = wallet_data_db_path(&app, wallet_db_key(wallet))?;
             let mut db_data = WalletDb::for_path(&data_db_path, TEST_NETWORK, SystemClock, rand::rngs::OsRng)
                 .map_err(|e| format!("wallet db open failed: {}", e))?;
+            if let Err(e) = fetch_and_store_transparent_utxos(&mut broadcast_client, &mut db_data, wallet.transparent_address.trim()).await.map(|_| ()) {
+                log::warn!("[zecvault] transparent UTXO refresh failed (non-fatal): {}", e);
+            }
             let (account_id, account_index) = find_wallet_account_id(&mut db_data, wallet)?;
             let to = zcash_keys::address::Address::decode(&TEST_NETWORK, proposal.to.trim())
                 .ok_or_else(|| "Invalid recipient address.".to_string())?;
@@ -2456,17 +3565,17 @@ fn get_transactions(app: tauri::AppHandle, limit: u32) -> Result<Vec<TxInfo>, St
         "PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000; PRAGMA synchronous=NORMAL;",
     )
     .map_err(|e| format!("wallet db pragma setup failed: {}", e))?;
-    // `v_transactions` provides wallet-relative deltas and fee. We add best-effort counterparty
-    // address extraction:
-    // - For sends: first non-change `sent_notes.to_address`.
-    // - For receives: first non-change wallet receive address from `addresses`.
+    // `v_transactions` provides wallet-relative deltas and fee. We additionally:
+    // - Decode the first ZIP-302 text memo (bytes starting with 0x73 = UTF-8 marker).
+    // - Surface pool info: which receive pools (orchard=3, sapling=2, transparent=0) are present.
+    // - Expose the is_shielding flag from v_transactions.
+    // - Extract counterparty address (to for sends, received-at for receives).
     let query = "
         SELECT
             v.txid,
             v.account_balance_delta,
             COALESCE(v.block_time, 0) AS block_time,
             COALESCE(v.mined_height, 0) AS mined_height,
-            COALESCE(v.memo_count, 0) AS memo_count,
             COALESCE(v.fee_paid, 0) AS fee_paid,
             (
                 SELECT sn.to_address
@@ -2486,10 +3595,50 @@ fn get_transactions(app: tauri::AppHandle, limit: u32) -> Result<Vec<TxInfo>, St
                 WHERE ro.transaction_id = t.id_tx
                   AND COALESCE(ro.is_change, 0) = 0
                 LIMIT 1
-            ) AS received_at
+            ) AS received_at,
+            (
+                -- ZIP-302: text memos start with 0x73; 0xF6 first byte = empty sentinel.
+                SELECT
+                    CASE
+                        WHEN SUBSTR(rn.memo, 1, 1) = X'73' AND LENGTH(rn.memo) > 1
+                        THEN TRIM(REPLACE(SUBSTR(CAST(rn.memo AS TEXT), 2), X'00', ''))
+                        ELSE NULL
+                    END
+                FROM (
+                    SELECT memo FROM orchard_received_notes
+                    WHERE transaction_id = t.id_tx
+                      AND memo IS NOT NULL
+                      AND SUBSTR(memo, 1, 1) != X'F6'
+                    UNION ALL
+                    SELECT memo FROM sapling_received_notes
+                    WHERE transaction_id = t.id_tx
+                      AND memo IS NOT NULL
+                      AND SUBSTR(memo, 1, 1) != X'F6'
+                ) rn
+                LIMIT 1
+            ) AS memo_text,
+            (
+                SELECT GROUP_CONCAT(DISTINCT
+                    CASE ro.pool
+                        WHEN 3 THEN 'orchard'
+                        WHEN 2 THEN 'sapling'
+                        WHEN 0 THEN 'transparent'
+                        ELSE NULL
+                    END
+                )
+                FROM v_received_outputs ro
+                WHERE ro.transaction_id = t.id_tx
+                  AND COALESCE(ro.is_change, 0) = 0
+            ) AS receive_pools,
+            COALESCE(v.is_shielding, 0) AS is_shielding
         FROM v_transactions v
         JOIN transactions t ON t.txid = v.txid
-        WHERE v.account_uuid = (SELECT uuid FROM accounts ORDER BY id LIMIT 1 OFFSET ?2)
+        WHERE v.account_uuid = (
+            SELECT uuid FROM accounts
+            WHERE hd_account_index = ?2
+               OR (hd_account_index IS NULL AND ?2 = 0)
+            ORDER BY id LIMIT 1
+        )
         ORDER BY COALESCE(v.mined_height, 0) DESC, COALESCE(v.tx_index, 0) DESC
         LIMIT ?1
     ";
@@ -2504,52 +3653,44 @@ fn get_transactions(app: tauri::AppHandle, limit: u32) -> Result<Vec<TxInfo>, St
             let value_zat: i64 = row.get(1)?;
             let block_time: i64 = row.get(2)?;
             let mined_height: i64 = row.get(3)?;
-            let memo_count: i64 = row.get(4)?;
-            let fee_paid: i64 = row.get(5)?;
-            let to_address: Option<String> = row.get(6)?;
-            let received_at: Option<String> = row.get(7)?;
+            let fee_paid: i64 = row.get(4)?;
+            let to_address: Option<String> = row.get(5)?;
+            let received_at: Option<String> = row.get(6)?;
+            let memo_text: Option<String> = row.get(7)?;
+            let receive_pools_csv: Option<String> = row.get(8)?;
+            let is_shielding: i64 = row.get(9)?;
             let txid = if txid_bytes.len() == 32 {
                 let mut raw = [0u8; 32];
                 raw.copy_from_slice(&txid_bytes);
                 TxId::from_bytes(raw).to_string()
             } else {
-                // Defensive fallback for unexpected DB encodings.
                 hex_encode(&txid_bytes)
             };
             let is_incoming = value_zat >= 0;
             let ua = wallet.unified_address.clone();
-            let to_addr = if is_incoming {
-                received_at.clone()
-            } else {
-                to_address.clone()
-            };
-            let from_addr = if is_incoming {
-                None
-            } else {
-                Some(ua)
-            };
+            let to_addr = if is_incoming { received_at } else { to_address };
+            let from_addr = if is_incoming { None } else { Some(ua) };
+            let pools: Vec<String> = receive_pools_csv
+                .unwrap_or_default()
+                .split(',')
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+                .collect();
             Ok(TxInfo {
                 txid,
                 value_zat,
-                timestamp: if block_time > 0 {
-                    block_time as u64
-                } else {
-                    now_unix_ts() as u64
-                },
-                block_height: if mined_height > 0 {
-                    (mined_height.min(i64::from(u32::MAX))) as u32
-                } else {
-                    0
-                },
+                timestamp: if block_time > 0 { block_time as u64 } else { now_unix_ts() as u64 },
+                block_height: if mined_height > 0 { (mined_height.min(i64::from(u32::MAX))) as u32 } else { 0 },
                 fee_zat: fee_paid,
                 to_address: to_addr,
                 from_address: from_addr,
-                memo: if memo_count > 0 {
-                    Some(format!("{} memo(s)", memo_count))
-                } else {
-                    None
-                },
+                memo: memo_text.and_then(|s| {
+                    let trimmed = s.trim().to_string();
+                    if trimmed.is_empty() { None } else { Some(trimmed) }
+                }),
                 is_incoming,
+                pools,
+                is_shielding: is_shielding != 0,
             })
         })
         .map_err(|e| format!("transaction query failed: {}", e))?;
@@ -2714,6 +3855,7 @@ pub fn run() {
             wallet_list,
             wallet_set_active,
             wallet_update_name,
+            wallet_update_birthday,
             wallet_remove,
             wallet_export_backup,
             wallet_export_all_backups,
@@ -2722,7 +3864,13 @@ pub fn run() {
             app_unlock,
             wallet_reset,
             get_balance,
+            wallet_get_balance,
             get_unified_address,
+            preview_transfer,
+            shield_transparent_funds,
+            preview_send_max,
+            send_max_transfer,
+            migrate_sapling_to_orchard,
             propose_transfer,
             execute_transfer,
             start_sync,

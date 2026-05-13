@@ -137,11 +137,14 @@ dependencies = [
  "tauri-plugin-store",
  "tokio",
  "tonic",
+ "zcash_address",
  "zcash_client_backend",
  "zcash_client_sqlite",
  "zcash_keys",
  "zcash_proofs",
  "zcash_protocol",
+ "zcash_script",
+ "zcash_transparent",
  "zip32",
 ]
 

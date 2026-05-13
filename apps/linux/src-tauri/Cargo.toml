@@ -45,6 +45,10 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 zcash_client_sqlite = { version = "0.20.0", features = ["orchard", "transparent-inputs"] }
 zcash_client_backend = { version = "0.22.0", features = ["orchard", "sync", "lightwalletd-tonic", "lightwalletd-tonic-transport", "transparent-inputs"] }
 zcash_proofs = { version = "0.27.0", features = ["bundled-prover"] }
+zcash_address = "0.11"
+# Direct dep so we can use OutPoint / TxOut / Script for transparent UTXO refresh.
+transparent = { package = "zcash_transparent", version = "0.7.0" }
+zcash_script = "0.4.4"
 secrecy = "0.8"
 async-trait = "0.1.89"
 rusqlite = "0.37.0"
