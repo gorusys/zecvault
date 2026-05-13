@@ -5,9 +5,8 @@ import type { NativeWalletSnapshot } from "@/lib/wallet-native";
 import {
   deriveWalletAddresses,
   isValidWalletMnemonic,
-  mockTxId,
-  mockUnifiedAddress,
   normalizeMnemonic,
+  parseVaultMemo,
   walletFingerprint,
 } from "@/lib/zec";
 
@@ -307,7 +306,7 @@ export const useWalletStore = create<WalletState>()(
 interface VaultState {
   vaults: Vault[];
   archive: Vault[];
-  createVault: (input: { walletFingerprint: string; category: GoalCategory; goalName: string; targetZat: number; deadlineTs: number; }) => Vault;
+  createVault: (input: { walletFingerprint: string; category: GoalCategory; goalName: string; targetZat: number; deadlineTs: number; vaultAddress: string; }) => Vault;
   deposit: (id: string, amountZat: number) => void;
   getVaultsForWallet: (walletFingerprint: string) => Vault[];
   getArchiveForWallet: (walletFingerprint: string) => Vault[];
@@ -316,6 +315,8 @@ interface VaultState {
   cancelBreak: (id: string) => void;
   executeBreak: (id: string) => void;
   removeVault: (id: string) => void;
+  setCommitmentTx: (id: string, txId: string, block: number) => void;
+  reconcileVaultDepositsFromTxHistory: (txs: TxRecord[]) => void;
 }
 
 const ONE_DAY_MS = 24 * 60 * 60 * 1000;
@@ -349,7 +350,7 @@ export const useVaultStore = create<VaultState>()(
     (set, get) => ({
       vaults: [],
       archive: [],
-      createVault: ({ walletFingerprint, category, goalName, targetZat, deadlineTs }) => {
+      createVault: ({ walletFingerprint, category, goalName, targetZat, deadlineTs, vaultAddress }) => {
         const normalizedTarget = Math.max(1, Math.floor(targetZat));
         const idx = get().vaults.length + get().archive.length + 1;
         const v: Vault = {
@@ -357,15 +358,15 @@ export const useVaultStore = create<VaultState>()(
           walletFingerprint,
           category, goalName, targetZat: normalizedTarget, deadlineTs,
           createdTs: Date.now(),
-          shieldedAddress: mockUnifiedAddress(`${walletFingerprint}|vault-${category}`, idx),
+          shieldedAddress: vaultAddress || "",
           derivationIndex: idx,
           currentBalanceZat: 0,
           contributions: [],
           streakDays: 0,
           lastContributionTs: 0,
           status: "active",
-          commitmentTxId: mockTxId("c" + idx),
-          commitmentBlock: 2_341_120,
+          commitmentTxId: "",
+          commitmentBlock: 0,
           breakRequest: null,
         };
         set({ vaults: [v, ...get().vaults] });
@@ -378,7 +379,7 @@ export const useVaultStore = create<VaultState>()(
         if (!vault) return;
         const now = Date.now();
         const contribution: TxRecord = {
-          id: mockTxId(`vault-deposit|${vault.id}|${now}`),
+          id: `vault-deposit:${vault.id}:${now}:${Math.random().toString(36).slice(2)}`,
           type: "vault-deposit",
           amountZat: normalizedAmount,
           walletFingerprint: vault.walletFingerprint,
@@ -406,25 +407,13 @@ export const useVaultStore = create<VaultState>()(
       completeVault: (id) => {
         const vault = get().vaults.find((x) => x.id === id);
         if (!vault) return;
-        const now = Date.now();
         set({
           vaults: get().vaults.filter((v) => v.id !== id),
           archive: [{ ...vault, status: "complete" as const, breakRequest: null }, ...get().archive],
         });
-        if (vault.currentBalanceZat > 0) {
-          useWalletStore.getState().addTx({
-            id: mockTxId(`vault-complete|${vault.id}|${now}`),
-            type: "vault-withdraw",
-            amountZat: Math.abs(vault.currentBalanceZat),
-            walletFingerprint: vault.walletFingerprint,
-            vaultId: vault.id,
-            memo: "Vault goal completed",
-            blockHeight: 0,
-            feeZat: 0,
-            timestamp: now,
-          });
-          adjustActiveWalletSpendable(vault.walletFingerprint, Math.abs(vault.currentBalanceZat));
-        }
+        // Release virtual lock — ZEC was always in the user's own unified address.
+        // adjustActiveWalletSpendable is not needed: Sidebar's refreshBalanceLight recomputes
+        // spendable = chainSpendable - Σ(active vault balances) and the vault is now archived.
       },
       requestBreak: (id) => set({
         vaults: get().vaults.map((v) => v.id === id
@@ -437,27 +426,47 @@ export const useVaultStore = create<VaultState>()(
       executeBreak: (id) => {
         const v = get().vaults.find((x) => x.id === id);
         if (!v) return;
-        const now = Date.now();
         set({
           vaults: get().vaults.filter((x) => x.id !== id),
           archive: [{ ...v, status: "archived" as const }, ...get().archive],
         });
-        if (v.currentBalanceZat > 0) {
-          useWalletStore.getState().addTx({
-            id: mockTxId(`vault-break|${v.id}|${now}`),
-            type: "vault-withdraw",
-            amountZat: Math.abs(v.currentBalanceZat),
-            walletFingerprint: v.walletFingerprint,
-            vaultId: v.id,
-            memo: "Vault broken early",
-            blockHeight: 0,
-            feeZat: 0,
-            timestamp: now,
-          });
-          adjustActiveWalletSpendable(v.walletFingerprint, Math.abs(v.currentBalanceZat));
-        }
+        // Release virtual lock — ZEC was always in the user's own unified address.
       },
       removeVault: (id) => set({ vaults: get().vaults.filter((v) => v.id !== id) }),
+      setCommitmentTx: (id, txId, block) => set({
+        vaults: get().vaults.map((v) => v.id === id ? { ...v, commitmentTxId: txId, commitmentBlock: block } : v),
+      }),
+      reconcileVaultDepositsFromTxHistory: (txs) => {
+        const { vaults } = get();
+        if (!vaults.length) return;
+        const knownIds = new Set(vaults.flatMap((v) => v.contributions.map((c) => c.id)));
+        const creditsPerVault: Record<string, TxRecord[]> = {};
+        for (const tx of txs) {
+          if (!tx.memo) continue;
+          const parsed = parseVaultMemo(tx.memo);
+          if (!parsed) continue;
+          const vault = vaults.find((v) => v.id === parsed.vaultId);
+          if (!vault || vault.status !== "active") continue;
+          if (knownIds.has(tx.id)) continue;
+          (creditsPerVault[vault.id] ??= []).push(tx);
+        }
+        if (!Object.keys(creditsPerVault).length) return;
+        const now = Date.now();
+        set({
+          vaults: vaults.map((v) => {
+            const credits = creditsPerVault[v.id];
+            if (!credits?.length) return v;
+            const addedZat = credits.reduce((s, c) => s + Math.abs(c.amountZat), 0);
+            return {
+              ...v,
+              currentBalanceZat: v.currentBalanceZat + addedZat,
+              contributions: [...credits, ...v.contributions],
+              lastContributionTs: now,
+              streakDays: nextStreakDays(v.lastContributionTs, v.streakDays, now),
+            };
+          }),
+        });
+      },
     }),
     { name: "zecvault-vaults", storage: createJSONStorage(() => localStorage) },
   ),
