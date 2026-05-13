@@ -116,6 +116,7 @@ export function Sidebar() {
           isShielding: tx.isShielding,
         }));
         setNativeTxHistory(nativeTxs);
+        useVaultStore.getState().reconcileVaultDepositsFromTxHistory(nativeTxs);
       } catch (e) {
         console.warn("[zecvault] getTransactions failed", e);
       }
