@@ -133,6 +133,17 @@ export function walletFingerprint(mnemonic: string): string {
   return deterministicHex("fp|" + normalizeMnemonic(mnemonic), 16);
 }
 
+export function formatVaultMemo(vaultId: string, goalName: string): string {
+  return `ZV1:${vaultId}:${goalName.slice(0, 100)}`;
+}
+
+export function parseVaultMemo(memo: string): { vaultId: string; goalName: string } | null {
+  if (!memo?.startsWith("ZV1:")) return null;
+  const parts = memo.slice(4).split(":");
+  if (parts.length < 2) return null;
+  return { vaultId: parts[0], goalName: parts.slice(1).join(":") };
+}
+
 export function deriveWalletAddresses(mnemonic: string, network: "mainnet" | "testnet") {
   const normalized = normalizeMnemonic(mnemonic);
   const suffix = deterministicHex(`${network}|${normalized}`, 76);
