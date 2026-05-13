@@ -20,6 +20,7 @@ export function NewVaultDrawer({ onClose }: { onClose: () => void }) {
   const price = useWalletStore((s) => s.zecUsdPrice);
   const activeWalletFingerprint = useWalletStore((s) => s.activeWalletFingerprint);
   const fallbackWalletFingerprint = useWalletStore((s) => s.walletFingerprint);
+  const unifiedAddress = useWalletStore((s) => s.unifiedAddress);
 
   const cat = category ? categoryOf(category) : null;
   const goalName = category === "custom" ? (customName || "Custom goal") : (cat?.name ?? "");
@@ -47,6 +48,7 @@ export function NewVaultDrawer({ onClose }: { onClose: () => void }) {
         goalName,
         targetZat: Number(zecToZat(finalAmount)),
         deadlineTs: deadlineTs!,
+        vaultAddress: unifiedAddress || "",
       });
       toast({ type: "success", title: "Vault created", description: `${v.goalName} is now active and sealed.` });
       onClose();
@@ -188,7 +190,6 @@ export function NewVaultDrawer({ onClose }: { onClose: () => void }) {
               <SumRow label="Goal" value={`${cat?.emoji}  ${goalName}`} />
               <SumRow label="Target" value={`${finalAmount.toFixed(4)} ZEC`} />
               <SumRow label="Deadline" value={fmtDate(deadlineTs!)} />
-              <SumRow label="On-chain memo" value="Encrypted commitment" />
               <SumRow label="Daily needed" value={`${dailyNeeded.toFixed(4)} ZEC`} last />
             </div>
 
@@ -200,7 +201,7 @@ export function NewVaultDrawer({ onClose }: { onClose: () => void }) {
 
             <div style={{ marginTop: 24, padding: "12px 14px", background: "var(--info-bg)", borderRadius: "var(--r-md)" }}>
               <span className="t-caption" style={{ color: "var(--info-text)" }}>
-                An encrypted commitment memo will be written to the Zcash blockchain on your first deposit. Only you can read it.
+                Online deposits create an encrypted on-chain record (self-send to your own address). Offline deposits lock balance virtually — no chain fee required. You can start with zero ZEC.
               </span>
             </div>
           </>
