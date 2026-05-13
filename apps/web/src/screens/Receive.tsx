@@ -97,15 +97,15 @@ export function Receive() {
   const baseBlocks: AddressBlock[] = [
     {
       key: "private",
-      title: "Private (shielded)",
-      subtitle: "Recommended for most users",
+      title: "Private (shielded) — Recommended",
+      subtitle: "Orchard + Sapling unified address. Sender's wallet auto-selects Orchard (most private) when possible. Works with all modern Zcash wallets.",
       addr: unifiedAddress,
       kind: "receiver",
     },
     {
       key: "public",
       title: "Public (transparent)",
-      subtitle: "Use only when sender/exchange requires it",
+      subtitle: "No privacy — all amounts visible on-chain. Use only when an exchange or service explicitly requires a transparent address.",
       addr: transparentAddress,
       kind: "receiver",
     },
