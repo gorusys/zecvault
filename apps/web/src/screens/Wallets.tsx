@@ -1,12 +1,14 @@
-import { useState } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import {
   addAccountNative,
   createWalletNative,
   finalizeCreateWalletNative,
+  getWalletBalanceNative,
   listWalletsNative,
   restoreWalletNative,
   setActiveWalletNative,
+  type NativeWalletBalanceInfo,
 } from "@/lib/wallet-native";
 import { fmtZec } from "@/lib/zec";
 import { useSettings, useVaultStore, useWalletStore } from "@/stores";
@@ -39,9 +41,15 @@ export function Wallets() {
   const [importBirthdayHeight, setImportBirthdayHeight] = useState("");
   const [importBusy, setImportBusy] = useState(false);
 
+  const [createBirthdayHeight, setCreateBirthdayHeight] = useState("");
+
   const [accountSourceFingerprint, setAccountSourceFingerprint] = useState("");
   const [accountName, setAccountName] = useState("");
+  const [accountBirthdayHeight, setAccountBirthdayHeight] = useState("");
   const [accountBusy, setAccountBusy] = useState(false);
+
+  const [walletBalances, setWalletBalances] = useState<Record<string, NativeWalletBalanceInfo>>({});
+  const balanceFetchRef = useRef(false);
 
   const createNameValid = createWalletName.trim().length > 0;
   const importNameValid = importWalletName.trim().length > 0;
@@ -51,6 +59,23 @@ export function Wallets() {
     const listed = await listWalletsNative();
     setWallets(listed.wallets, listed.activeWalletFingerprint);
   }
+
+  // Fetch balance for every wallet in the list (non-active wallets show 0 without this).
+  useEffect(() => {
+    if (balanceFetchRef.current || wallets.length === 0) return;
+    balanceFetchRef.current = true;
+    void (async () => {
+      const results: Record<string, NativeWalletBalanceInfo> = {};
+      await Promise.allSettled(
+        wallets.map(async (w) => {
+          const bal = await getWalletBalanceNative(w.walletFingerprint);
+          if (bal) results[w.walletFingerprint] = bal;
+        }),
+      );
+      setWalletBalances(results);
+      balanceFetchRef.current = false;
+    })();
+  }, [wallets]);
 
   async function handleSetActive(walletFingerprint: string) {
     const resp = await setActiveWalletNative(walletFingerprint);
@@ -93,7 +118,7 @@ export function Wallets() {
               {!createMnemonic ? (
                 <>
                   <div className="t-caption text-gray-400" style={{ marginBottom: 10 }}>
-                    Generate a brand-new 24-word seed phrase. The wallet birthday is set to the current block height so syncing starts from today.
+                    Generate a brand-new 24-word seed phrase. By default the birthday is set to the current block so syncing starts from today.
                   </div>
                   <label className="label">Wallet name</label>
                   <input
@@ -101,6 +126,17 @@ export function Wallets() {
                     value={createWalletName}
                     onChange={(e) => setCreateWalletName(e.target.value)}
                     placeholder="e.g. Daily Spending"
+                  />
+                  <label className="label" style={{ marginTop: 8 }}>
+                    Birthday block height <span className="text-gray-400">(optional — leave blank for current block)</span>
+                  </label>
+                  <input
+                    className="input"
+                    type="number"
+                    min={0}
+                    value={createBirthdayHeight}
+                    onChange={(e) => setCreateBirthdayHeight(e.target.value)}
+                    placeholder="e.g. 2500000"
                   />
                   <button
                     className="btn btn-secondary"
@@ -146,11 +182,14 @@ export function Wallets() {
                       onClick={async () => {
                         try {
                           setCreateBusy(true);
+                          const parsedCreateBirthday = createBirthdayHeight.trim()
+                            ? parseInt(createBirthdayHeight.trim(), 10)
+                            : undefined;
                           const finalized = await finalizeCreateWalletNative(
                             createMnemonic,
                             network,
                             undefined,
-                            undefined,
+                            parsedCreateBirthday,
                             createDraftId,
                             createWalletName.trim(),
                           );
@@ -162,6 +201,7 @@ export function Wallets() {
                           setCreateMnemonic("");
                           setCreateDraftId(undefined);
                           setCreateWalletName("");
+                          setCreateBirthdayHeight("");
                           setCreateSeedConfirmed(false);
                           setShowAdd(false);
                           toast({ type: "success", title: "Wallet added" });
@@ -178,6 +218,7 @@ export function Wallets() {
                         setCreateMnemonic("");
                         setCreateDraftId(undefined);
                         setCreateWalletName("");
+                        setCreateBirthdayHeight("");
                         setCreateSeedConfirmed(false);
                       }}
                     >
@@ -217,6 +258,17 @@ export function Wallets() {
                 onChange={(e) => setAccountName(e.target.value)}
                 placeholder="e.g. Savings"
               />
+              <label className="label" style={{ marginTop: 8 }}>
+                Birthday block height <span className="text-gray-400">(optional — leave blank for current block)</span>
+              </label>
+              <input
+                className="input"
+                type="number"
+                min={0}
+                value={accountBirthdayHeight}
+                onChange={(e) => setAccountBirthdayHeight(e.target.value)}
+                placeholder="e.g. 2500000"
+              />
               <button
                 className="btn btn-secondary"
                 style={{ marginTop: 10 }}
@@ -224,7 +276,14 @@ export function Wallets() {
                 onClick={async () => {
                   try {
                     setAccountBusy(true);
-                    const resp = await addAccountNative(accountSourceFingerprint, accountName.trim() || undefined);
+                    const parsedAccountBirthday = accountBirthdayHeight.trim()
+                      ? parseInt(accountBirthdayHeight.trim(), 10)
+                      : undefined;
+                    const resp = await addAccountNative(
+                      accountSourceFingerprint,
+                      accountName.trim() || undefined,
+                      parsedAccountBirthday,
+                    );
                     if (!resp.ok) {
                       toast({ type: "danger", title: "Add account failed", description: resp.error ?? "Could not derive new account." });
                       return;
@@ -232,9 +291,13 @@ export function Wallets() {
                     await refreshWallets();
                     setAccountSourceFingerprint("");
                     setAccountName("");
+                    setAccountBirthdayHeight("");
                     setShowAdd(false);
                     const idx = resp.snapshot?.accountIndex ?? "?";
-                    toast({ type: "success", title: `Account #${idx} added`, description: "Syncing from current block height." });
+                    const birthdayDesc = parsedAccountBirthday
+                      ? `Birthday set to block ${parsedAccountBirthday.toLocaleString()}.`
+                      : "Syncing from current block height.";
+                    toast({ type: "success", title: `Account #${idx} added`, description: birthdayDesc });
                   } catch (error) {
                     const detail = error instanceof Error ? error.message : "Could not derive new account.";
                     toast({ type: "danger", title: "Add account failed", description: detail });
@@ -251,7 +314,10 @@ export function Wallets() {
           {addMode === "import" && (
             <>
               <div className="t-caption text-gray-400" style={{ marginBottom: 10 }}>
-                Restore a wallet from an existing 24-word seed phrase. If you know the approximate block height when the wallet first received funds, enter it below — this avoids scanning the entire chain history.
+                Restore a wallet from an existing 24-word seed phrase. Leave the birthday blank to scan from the Sapling activation height (safest — finds all funds). If you know the block height when the wallet was first created, enter it to speed up the initial sync.
+                <span style={{ display: "block", marginTop: 6, color: "var(--warning-text)" }}>
+                  Tip: If your transparent funds don't appear after syncing, use the "Shield transparent funds" option in the Send screen — it fetches pre-birthday UTXOs directly from the network.
+                </span>
               </div>
               <label className="label">Wallet name</label>
               <input
@@ -329,6 +395,12 @@ export function Wallets() {
               const lockedZat = vaults
                 .filter((v) => (v.walletFingerprint || w.walletFingerprint) === w.walletFingerprint)
                 .reduce((sum, v) => sum + v.currentBalanceZat, 0);
+              const walletTotal = isActive ? totalZat : (walletBalances[w.walletFingerprint]?.totalZat ?? null);
+              const walletSpendable = isActive
+                ? spendableZat
+                : walletBalances[w.walletFingerprint]
+                  ? Math.max(0, (walletBalances[w.walletFingerprint].spendableZat) - lockedZat)
+                  : null;
               return (
                 <div key={w.walletFingerprint} className="hstack between" style={{ padding: 10, border: "1px solid var(--gray-100)", borderRadius: "var(--r-md)" }}>
                   <div>
@@ -341,9 +413,10 @@ export function Wallets() {
                       {w.network}
                     </div>
                     <div className="hstack gap-8" style={{ marginTop: 4, flexWrap: "wrap" }}>
-                      <span className="pill">Total: {isActive ? `${fmtZec(totalZat)} ZEC` : "Set active to load"}</span>
+                      <span className="pill">Total: {walletTotal !== null ? `${fmtZec(walletTotal)} ZEC` : "Loading…"}</span>
                       <span className="pill">Locked: {fmtZec(lockedZat)} ZEC</span>
-                      <span className="pill">Spendable: {isActive ? `${fmtZec(spendableZat)} ZEC` : "Set active to load"}</span>
+                      <span className="pill">Spendable: {walletSpendable !== null ? `${fmtZec(walletSpendable)} ZEC` : "Loading…"}</span>
+                      {w.birthdayHeight ? <span className="pill" title="Wallet birthday — blocks before this height were not scanned for shielded history">Birthday: {w.birthdayHeight.toLocaleString()}</span> : null}
                     </div>
                   </div>
                   <div className="hstack gap-8">
