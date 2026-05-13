@@ -29,10 +29,8 @@ jobs:
             libssl-dev \
             protobuf-compiler
 
-      - name: Install Rust 1.85.1
+      - name: Install Rust (stable)
         uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: "1.85.1"
 
       - name: Rust build cache
         uses: Swatinem/rust-cache@v2
