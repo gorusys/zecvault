@@ -1093,6 +1093,7 @@ async fn probe_and_connect(
             let result: Result<(CompactTxStreamerClient<Channel>, u32), String> = async {
                 let channel = tonic::transport::Endpoint::new(ep.clone())
                     .map_err(|e| format!("{}: invalid endpoint: {}", ep, e))?
+                    .connect_timeout(std::time::Duration::from_secs(10))
                     .tcp_keepalive(Some(std::time::Duration::from_secs(60)))
                     .http2_keep_alive_interval(std::time::Duration::from_secs(60))
                     .keep_alive_while_idle(true)
@@ -1100,8 +1101,10 @@ async fn probe_and_connect(
                     .await
                     .map_err(|e| format!("{}: connect: {}", ep, e))?;
                 let mut client = CompactTxStreamerClient::new(channel);
+                let mut req = tonic::Request::new(service::ChainSpec {});
+                req.set_timeout(std::time::Duration::from_secs(10));
                 let tip = client
-                    .get_latest_block(service::ChainSpec {})
+                    .get_latest_block(req)
                     .await
                     .map_err(|e| format!("{}: get_latest_block: {}", ep, e))?
                     .into_inner()

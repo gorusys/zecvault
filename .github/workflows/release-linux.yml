@@ -11,8 +11,17 @@ permissions:
 
 jobs:
   build:
-    name: Build & Release (Linux x86_64)
-    runs-on: ubuntu-22.04
+    name: Build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            os-label: ubuntu22
+          - os: ubuntu-24.04
+            os-label: ubuntu24
 
     steps:
       - name: Checkout
@@ -36,6 +45,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: "apps/linux/src-tauri -> target"
+          key: ${{ matrix.os }}
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
@@ -54,22 +64,37 @@ jobs:
       - name: Build Linux release
         run: pnpm build:linux
         env:
-          # zig cc linker is provided by @ziglang/cli installed above;
-          # tauri:build script sets CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER to tools/bin/cc
           CI: true
 
-      - name: Collect artifacts
+      - name: Rename artifacts with OS label
         id: artifacts
         run: |
           BUNDLE=apps/linux/src-tauri/target/release/bundle
-          APPIMAGE=$(ls "$BUNDLE"/appimage/*.AppImage | head -1)
-          DEB=$(ls "$BUNDLE"/deb/*.deb | head -1)
-          RPM=$(ls "$BUNDLE"/rpm/*.rpm | head -1)
-          echo "appimage=$APPIMAGE" >> "$GITHUB_OUTPUT"
-          echo "deb=$DEB" >> "$GITHUB_OUTPUT"
-          echo "rpm=$RPM" >> "$GITHUB_OUTPUT"
+          LABEL="${{ matrix.os-label }}"
 
-      - name: Create GitHub Release
+          # AppImage
+          SRC_APPIMAGE=$(ls "$BUNDLE"/appimage/*.AppImage | head -1)
+          BASE=$(basename "$SRC_APPIMAGE" .AppImage)
+          DST_APPIMAGE="$BUNDLE/appimage/${BASE}-${LABEL}.AppImage"
+          mv "$SRC_APPIMAGE" "$DST_APPIMAGE"
+
+          # .deb
+          SRC_DEB=$(ls "$BUNDLE"/deb/*.deb | head -1)
+          BASE=$(basename "$SRC_DEB" .deb)
+          DST_DEB="$BUNDLE/deb/${BASE}-${LABEL}.deb"
+          mv "$SRC_DEB" "$DST_DEB"
+
+          # .rpm
+          SRC_RPM=$(ls "$BUNDLE"/rpm/*.rpm | head -1)
+          BASE=$(basename "$SRC_RPM" .rpm)
+          DST_RPM="$BUNDLE/rpm/${BASE}-${LABEL}.rpm"
+          mv "$SRC_RPM" "$DST_RPM"
+
+          echo "appimage=$DST_APPIMAGE" >> "$GITHUB_OUTPUT"
+          echo "deb=$DST_DEB" >> "$GITHUB_OUTPUT"
+          echo "rpm=$DST_RPM" >> "$GITHUB_OUTPUT"
+
+      - name: Upload to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           files: |
