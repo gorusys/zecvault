@@ -94,6 +94,7 @@ export function History() {
   const activeWalletFingerprint = useWalletStore((s) => s.activeWalletFingerprint);
   const fallbackWalletFingerprint = useWalletStore((s) => s.walletFingerprint);
   const activeWalletKey = activeWalletFingerprint || fallbackWalletFingerprint;
+  const syncStatus = useWalletStore((s) => s.syncStatus);
   const [tab, setTab] = useState<typeof TABS[number]>("All");
   const [q, setQ] = useState("");
   const [expandedTx, setExpandedTx] = useState<string | null>(null);
@@ -145,16 +146,36 @@ export function History() {
 
       <div className="card">
         {filtered.length === 0 ? (
-          <div className="t-body text-gray-600" style={{ padding: 48, textAlign: "center" }}>No transactions match your filter.</div>
+          <div style={{ padding: 48, textAlign: "center" }}>
+            {syncStatus !== "synced" && tab === "All" && !q ? (
+              <>
+                <div className="t-body text-gray-600" style={{ marginBottom: 8 }}>
+                  Scanning blockchain for transactions…
+                </div>
+                <div className="t-caption text-gray-400">
+                  Restored wallets with an old birthday height scan millions of historical blocks before transactions appear. This can take several minutes to a few hours depending on the birthday height.
+                </div>
+              </>
+            ) : (
+              <div className="t-body text-gray-600">No transactions match your filter.</div>
+            )}
+          </div>
         ) : filtered.map((tx) => {
           const isReceived = tx.type === "received";
           const isVault = tx.type.startsWith("vault");
           const isNativeTx = tx.id.startsWith("native:");
+          const isShielding = tx.isShielding ?? false;
           const vault = isVault ? [...vaults, ...archive].find((v) => v.id === tx.vaultId) : null;
           const cat = vault ? categoryOf(vault.category) : null;
           const color = isReceived ? "var(--success-strong)" : isVault ? "#4FA3E3" : "var(--coral-400)";
           const txid = isNativeTx ? tx.id.slice("native:".length) : "";
           const isExpanded = expandedTx === tx.id;
+          const poolBadges = (tx.pools ?? []).map((p) => {
+            const label = p === "orchard" ? "Orchard" : p === "sapling" ? "Sapling" : p === "transparent" ? "Transparent" : p;
+            const bg = p === "orchard" ? "var(--success-bg)" : p === "sapling" ? "#e0f2f7" : "#fff3cd";
+            const clr = p === "orchard" ? "var(--success-strong)" : p === "sapling" ? "#0077a0" : "#856404";
+            return { label, bg, clr };
+          });
           return (
             <div key={tx.id} style={{ borderBottom: "1px solid var(--gray-100)" }}>
               <button
@@ -168,8 +189,11 @@ export function History() {
                 </div>
                 <div style={{ flex: 1, minWidth: 0, textAlign: "left" }}>
                   <div className="t-body-med">
-                    {isVault ? `Vault: ${vault?.goalName ?? ""}` : isReceived ? "Received" : "Sent"}
+                    {isVault ? `Vault: ${vault?.goalName ?? ""}` : isShielding ? "Shielding" : isReceived ? "Received" : "Sent"}
                     {cat && <span className="pill cat-tint" style={{ marginLeft: 6 }}>{cat.emoji} {cat.name}</span>}
+                    {poolBadges.map(({ label, bg, clr }) => (
+                      <span key={label} className="pill" style={{ marginLeft: 6, background: bg, color: clr, border: "none" }}>{label}</span>
+                    ))}
                     {isNativeTx && tx.blockHeight > 0 && <span className="pill" style={{ marginLeft: 6 }}>Mined</span>}
                     {isNativeTx && tx.blockHeight === 0 && <span className="pill" style={{ marginLeft: 6 }}>Pending</span>}
                   </div>
@@ -224,8 +248,8 @@ export function History() {
                     </div>
                   </div>
                   {tx.memo && (
-                    <div className="t-caption text-gray-600" style={{ marginBottom: 12, overflowWrap: "anywhere", wordBreak: "break-word" }}>
-                      Memo: {tx.memo}
+                    <div style={{ marginBottom: 12 }}>
+                      <DetailRow label="Memo" value={tx.memo} copyable />
                     </div>
                   )}
                   {isNativeTx && txid && (
