@@ -1,0 +1,81 @@
+name: Release Linux
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build & Release (Linux x86_64)
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            libssl-dev \
+            protobuf-compiler
+
+      - name: Install Rust 1.85.1
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.85.1"
+
+      - name: Rust build cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "apps/linux/src-tauri -> target"
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build Linux release
+        run: pnpm build:linux
+        env:
+          # zig cc linker is provided by @ziglang/cli installed above;
+          # tauri:build script sets CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER to tools/bin/cc
+          CI: true
+
+      - name: Collect artifacts
+        id: artifacts
+        run: |
+          BUNDLE=apps/linux/src-tauri/target/release/bundle
+          APPIMAGE=$(ls "$BUNDLE"/appimage/*.AppImage | head -1)
+          DEB=$(ls "$BUNDLE"/deb/*.deb | head -1)
+          RPM=$(ls "$BUNDLE"/rpm/*.rpm | head -1)
+          echo "appimage=$APPIMAGE" >> "$GITHUB_OUTPUT"
+          echo "deb=$DEB" >> "$GITHUB_OUTPUT"
+          echo "rpm=$RPM" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            ${{ steps.artifacts.outputs.appimage }}
+            ${{ steps.artifacts.outputs.deb }}
+            ${{ steps.artifacts.outputs.rpm }}
+          generate_release_notes: true
