@@ -162,23 +162,40 @@ export function Dashboard() {
             <div className="t-caption text-gray-400" style={{ marginTop: 4 }}>24h change</div>
           </div>
         </div>
-        {expertAddressMode && (orchardZat > 0 || saplingZat > 0 || transparentZat > 0 || totalZat > 0) && (
+        {(orchardZat > 0 || saplingZat > 0 || transparentZat > 0) && (
           <div style={{ marginTop: 16, paddingTop: 16, borderTop: "1px solid var(--gray-100)", textAlign: "left" }}>
-            {/* <div className="t-label" style={{ marginBottom: 8 }}>Spendable by pool (synced)</div> */}
-            <div className="hstack gap-10" style={{ flexWrap: "wrap" }}>
-              <span className="t-caption text-gray-600">
-                Orchard: <span className="t-mono">{fmtZec(orchardZat)}</span>
-              </span>
-              <span className="t-caption text-gray-600">
-                Sapling: <span className="t-mono">{fmtZec(saplingZat)}</span>
-              </span>
-              <span className="t-caption text-gray-600">
-                Transparent: <span className="t-mono">{fmtZec(transparentZat)}</span>
-              </span>
+            <div className="t-caption text-gray-400" style={{ marginBottom: 8 }}>Pool breakdown</div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+              {orchardZat > 0 && (
+                <div className="hstack gap-8" style={{ justifyContent: "space-between" }}>
+                  <span className="t-caption text-gray-600">
+                    Orchard <span className="pill pill-success" style={{ fontSize: "0.7rem", padding: "1px 6px" }}>private</span>
+                  </span>
+                  <span className="t-mono t-caption">{fmtZec(orchardZat)} ZEC</span>
+                </div>
+              )}
+              {saplingZat > 0 && (
+                <div className="hstack gap-8" style={{ justifyContent: "space-between" }}>
+                  <span className="t-caption text-gray-600">
+                    Sapling <span className="pill" style={{ fontSize: "0.7rem", padding: "1px 6px", background: "#e0f2f7", color: "#0077a0", border: "none" }}>private</span>
+                  </span>
+                  <span className="t-mono t-caption">{fmtZec(saplingZat)} ZEC</span>
+                </div>
+              )}
+              {transparentZat > 0 && (
+                <div className="hstack gap-8" style={{ justifyContent: "space-between" }}>
+                  <span className="t-caption text-gray-600">
+                    Transparent <span className="pill pill-warning" style={{ fontSize: "0.7rem", padding: "1px 6px" }}>public</span>
+                  </span>
+                  <span className="t-mono t-caption">{fmtZec(transparentZat)} ZEC</span>
+                </div>
+              )}
             </div>
-            {/* <p className="t-caption text-gray-400" style={{ marginTop: 8, marginBottom: 0 }}>
-              Cross-pool sends combine pools when the wallet can build a valid ZIP 317 proposal. If one pool is short, try a smaller amount or move value between pools with an intermediate send to yourself.
-            </p> */}
+            {saplingZat > 0 && (
+              <div className="t-caption text-gray-400" style={{ marginTop: 10 }}>
+                Sapling funds detected. Visit Wallet Detail to migrate them to Orchard for better privacy.
+              </div>
+            )}
           </div>
         )}
       </div>
