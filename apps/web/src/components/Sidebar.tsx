@@ -112,6 +112,8 @@ export function Sidebar() {
           toAddress: tx.toAddress,
           fromAddress: tx.fromAddress,
           timestamp: tx.timestamp > 1_000_000_000_000 ? tx.timestamp : tx.timestamp * 1000,
+          pools: tx.pools,
+          isShielding: tx.isShielding,
         }));
         setNativeTxHistory(nativeTxs);
       } catch (e) {
@@ -137,37 +139,16 @@ export function Sidebar() {
     };
 
     const refreshMarketPrice = async () => {
+      if (typeof window === "undefined" || !("__TAURI_INTERNALS__" in window)) return;
       try {
-        const isTauriRuntime = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
-        if (isTauriRuntime) {
-          const { invoke } = await import("@tauri-apps/api/core");
-          const mp = await invoke<{ zecUsdPrice: number; priceChange24h: number }>("get_market_price");
-          if (typeof mp?.zecUsdPrice === "number" && Number.isFinite(mp.zecUsdPrice) && mp.zecUsdPrice > 0) {
-            setMarketData({
-              zecUsdPrice: mp.zecUsdPrice,
-              priceChange24h: typeof mp.priceChange24h === "number" && Number.isFinite(mp.priceChange24h) ? mp.priceChange24h : 0,
-            });
-            return;
-          }
+        const { invoke } = await import("@tauri-apps/api/core");
+        const mp = await invoke<{ zecUsdPrice: number; priceChange24h: number }>("get_market_price");
+        if (typeof mp?.zecUsdPrice === "number" && Number.isFinite(mp.zecUsdPrice) && mp.zecUsdPrice > 0) {
+          setMarketData({
+            zecUsdPrice: mp.zecUsdPrice,
+            priceChange24h: typeof mp.priceChange24h === "number" && Number.isFinite(mp.priceChange24h) ? mp.priceChange24h : 0,
+          });
         }
-
-        // Web/dev fallback
-        const res = await fetch(
-          "https://api.coingecko.com/api/v3/simple/price?ids=zcash&vs_currencies=usd&include_24hr_change=true",
-          { cache: "no-store" },
-        );
-        if (!res.ok) return;
-        const json = (await res.json()) as {
-          zcash?: { usd?: number; usd_24h_change?: number };
-        };
-        const usd = json.zcash?.usd;
-        const change24h = json.zcash?.usd_24h_change;
-        if (typeof usd !== "number" || Number.isNaN(usd)) return;
-        setMarketData({
-          zecUsdPrice: usd,
-          priceChange24h:
-            typeof change24h === "number" && !Number.isNaN(change24h) ? change24h : 0,
-        });
       } catch {
         // Keep previous market values on transient fetch failures.
       }

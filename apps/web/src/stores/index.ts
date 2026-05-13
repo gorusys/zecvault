@@ -26,6 +26,8 @@ export interface TxRecord {
   blockHeight: number;
   feeZat: number;
   timestamp: number;
+  pools?: string[];
+  isShielding?: boolean;
 }
 
 export interface BreakRequest { requestTs: number; unlockTs: number; }

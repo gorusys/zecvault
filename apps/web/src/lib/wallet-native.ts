@@ -267,6 +267,24 @@ export async function renameWalletNative(walletFingerprint: string, walletName: 
   return { ok: false, error: "Native runtime unavailable." };
 }
 
+export async function updateWalletBirthdayNative(
+  walletFingerprint: string,
+  birthdayHeight: number,
+): Promise<NativeOpResponse> {
+  if (isTauriRuntime()) {
+    try {
+      return await invokeTauri<NativeOpResponse>(
+        "wallet_update_birthday",
+        { walletFingerprint, birthdayHeight },
+        30_000,
+      );
+    } catch {
+      return { ok: false, error: "Birthday update unavailable on this platform build." };
+    }
+  }
+  return { ok: false, error: "Native runtime unavailable." };
+}
+
 export async function removeWalletNative(walletFingerprint: string): Promise<NativeOpResponse> {
   if (isTauriRuntime()) {
     try {
@@ -312,13 +330,81 @@ export async function resetWalletNative(): Promise<NativeOpResponse> {
 export async function addAccountNative(
   sourceFingerprint: string,
   walletName?: string,
+  birthdayHeight?: number,
 ): Promise<NativeOpResponse> {
   if (!isTauriRuntime()) {
     return { ok: false, error: "Native runtime unavailable." };
   }
   return invokeTauri<NativeOpResponse>(
     "wallet_add_account",
-    { sourceFingerprint, walletName },
+    { sourceFingerprint, walletName, birthdayHeight },
     60_000,
   );
+}
+
+export interface NativeWalletBalanceInfo {
+  orchardZat: number;
+  saplingZat: number;
+  transparentZat: number;
+  pendingZat: number;
+  totalZat: number;
+  spendableZat: number;
+}
+
+export async function getWalletBalanceNative(walletFingerprint: string): Promise<NativeWalletBalanceInfo | null> {
+  if (!isTauriRuntime()) return null;
+  try {
+    return await invokeTauri<NativeWalletBalanceInfo>("wallet_get_balance", { walletFingerprint }, 15_000);
+  } catch {
+    return null;
+  }
+}
+
+export interface NativeTransferPreviewResult {
+  ok: boolean;
+  error?: string;
+  feeZat: number;
+  amountZat: number;
+  totalDebitZat: number;
+  needsShielding: boolean;
+}
+
+/** Preview exact send-max fee and amount. Orchard-first pool order. Does not sync. */
+export async function previewSendMaxNative(
+  to: string,
+  memo?: string,
+): Promise<NativeTransferPreviewResult> {
+  if (!isTauriRuntime()) {
+    return { ok: false, error: "Native runtime unavailable.", feeZat: 0, amountZat: 0, totalDebitZat: 0, needsShielding: false };
+  }
+  return invokeTauri<NativeTransferPreviewResult>("preview_send_max", { to, memo }, 30_000);
+}
+
+/** Drain all spendable shielded funds (Orchard first, then Sapling) to a single recipient. Syncs first. */
+export async function sendMaxTransferNative(to: string, memo?: string): Promise<string> {
+  if (!isTauriRuntime()) throw new Error("Native runtime unavailable.");
+  return invokeTauri<string>("send_max_transfer", { to, memo }, 120_000);
+}
+
+/**
+ * Shield transparent funds to a shielded pool.
+ * @param targetPool "orchard" (default, always) | "sapling" (expert opt-in only)
+ */
+export async function shieldTransparentFundsNative(targetPool?: "orchard" | "sapling"): Promise<string> {
+  if (!isTauriRuntime()) throw new Error("Native runtime unavailable.");
+  return invokeTauri<string>("shield_transparent_funds", { targetPool }, 120_000);
+}
+
+/** Migrate all spendable Sapling funds to the Orchard pool via a self-send. */
+export async function migrateSaplingToOrchardNative(): Promise<NativeOpResponse> {
+  if (!isTauriRuntime()) {
+    return { ok: false, error: "Native runtime unavailable." };
+  }
+  try {
+    await invokeTauri<string>("migrate_sapling_to_orchard", undefined, 120_000);
+    return { ok: true, snapshot: undefined, error: undefined };
+  } catch (e) {
+    const detail = e instanceof Error ? e.message : String(e);
+    return { ok: false, error: detail };
+  }
 }
