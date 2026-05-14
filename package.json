@@ -19,7 +19,8 @@
     "build:win": "npm run build -w @zecvault/web && npm run tauri:build -w @zecvault/windows",
     "build:mac": "npm run build -w @zecvault/web && npm run tauri:build -w @zecvault/macos",
     "build:linux": "npm run build -w @zecvault/web && npm run tauri:build -w @zecvault/linux",
-    "build:pwa": "npm run build -w @zecvault/pwa"
+    "build:pwa": "npm run build -w @zecvault/pwa",
+    "version:bump": "node scripts/bump-version.mjs"
   },
   "devDependencies": {
     "@eslint/js": "^9.32.0",
