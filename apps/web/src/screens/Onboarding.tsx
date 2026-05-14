@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { tagline } from "@/lib/tokens";
 import { isValidWalletMnemonic, normalizeMnemonic } from "@/lib/zec";
 import { createWalletNative, finalizeCreateWalletNative, restoreWalletNative, type NativeWalletSnapshot } from "@/lib/wallet-native";
@@ -22,6 +22,7 @@ export function Onboarding() {
   const [walletPasswordConfirm, setWalletPasswordConfirm] = useState("");
   const [seed, setSeed] = useState<string[]>([]);
   const [seedLoading, setSeedLoading] = useState(false);
+  const seedInFlight = useRef(false);
   const [submitting, setSubmitting] = useState(false);
   const [seedError, setSeedError] = useState<string | null>(null);
   const [seedRetryToken, setSeedRetryToken] = useState(0);
@@ -55,20 +56,21 @@ export function Onboarding() {
   }, [walletChoice]);
 
   useEffect(() => {
-    if (step !== 2 || walletChoice !== "create" || createdSnapshot || seedLoading || seedError) return;
+    if (step !== 2 || walletChoice !== "create" || createdSnapshot || seedInFlight.current || seedError) return;
     if (walletPassword.length < 8) return;
-    let ignore = false;
+    let cancelled = false;
+    seedInFlight.current = true;
+    setSeedLoading(true);
     const loadSeed = async () => {
       try {
-        setSeedLoading(true);
         setSeedError(null);
         const created = await createWalletNative(network);
-        if (ignore) return;
+        if (cancelled) return;
         setSeed(created.mnemonicWords);
         setCreatedSnapshot(created.snapshot);
         setCreatedDraftId(created.draftId);
       } catch (error) {
-        if (!ignore) {
+        if (!cancelled) {
           const detail = error instanceof Error ? error.message : "Could not generate wallet seed. Please try again.";
           setSeed([]);
           setCreatedSnapshot(null);
@@ -77,14 +79,20 @@ export function Onboarding() {
           toast({ type: "danger", title: "Wallet setup failed", description: detail });
         }
       } finally {
-        if (!ignore) setSeedLoading(false);
+        seedInFlight.current = false;
+        if (!cancelled) setSeedLoading(false);
       }
     };
     void loadSeed();
     return () => {
-      ignore = true;
+      cancelled = true;
     };
-  }, [createdSnapshot, network, seedError, seedLoading, step, walletChoice, seedRetryToken, walletPassword]);
+  // seedLoading intentionally excluded: it's set inside this effect, including it in deps
+  // causes the cleanup to fire immediately (setting cancelled=true) before the async call
+  // resolves, permanently locking the UI on "Preparing your wallet seed...".
+  // seedInFlight ref is the actual re-entry guard.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [createdSnapshot, network, seedError, step, walletChoice, seedRetryToken, walletPassword]);
 
   const canContinue =
     step === 0 ? name.trim().length > 0 :
