@@ -3,6 +3,7 @@ import { useSettings, useVaultStore, useWalletStore } from "@/stores";
 import type { TxRecord } from "@/stores";
 import { fmtZec, zecToZat } from "@/lib/zec";
 import { classifySendRecipient, normalizeRecipientInput, parsePaymentUri, surfaceKindFromRecipient } from "@/lib/zcash-address";
+import { AddressAlias } from "@/components/AddressAlias";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { Icon } from "@/components/Icon";
 import { toast } from "@/stores/toast";
@@ -288,6 +289,7 @@ export function Send() {
               <div className="t-mono" style={{ color: "var(--gray-900)", marginTop: 4, wordBreak: "break-all" }}>
                 {normalizedAddr}
               </div>
+              <AddressAlias address={normalizedAddr} />
             </div>
             <div className="t-caption text-gray-600" style={{ marginTop: 4 }}>
               Transaction ID
@@ -380,6 +382,7 @@ export function Send() {
             </div>
             {expertLabel && <span className={`pill ${expertLabel.className}`} style={{ marginTop: 8 }}>{expertLabel.text}</span>}
             {simpleLabel && <span className={`pill ${simpleLabel.className}`} style={{ marginTop: 8 }}>{simpleLabel.text}</span>}
+            {normalizedAddr && kind !== "invalid" && <AddressAlias address={normalizedAddr} />}
             {normalizedAddr && kind === "invalid" && (
               <div className="t-caption" style={{ marginTop: 6, color: "var(--danger-strong)" }}>
                 Not a valid Zcash address for this wallet network.
@@ -623,6 +626,7 @@ export function Send() {
                 <div className="t-mono" style={{ color: "var(--gray-900)", marginTop: 4, wordBreak: "break-all" }}>
                   {normalizedAddr}
                 </div>
+                <AddressAlias address={normalizedAddr} />
               </div>
 
               <div className="hstack between" style={{ padding: "10px 12px", background: "var(--gray-25)", borderRadius: "var(--r-sm)" }}>

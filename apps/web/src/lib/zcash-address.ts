@@ -1,3 +1,6 @@
+import { blake2b } from "@noble/hashes/blake2";
+import { wordlist as bip39English } from "@scure/bip39/wordlists/english.js";
+
 /**
  * Lightweight client-side classification for Send / validation UX.
  * Authoritative checks happen in the Tauri wallet via `Address::decode`.
@@ -98,4 +101,37 @@ export function parsePaymentUri(raw: string): ParsedPaymentUri | null {
   }
 
   return result;
+}
+
+// 16-byte personalization for BLAKE2b: "ZcashAddrAlias" (14 bytes) + 0x00 0x00
+const ALIAS_PERSONAL = (() => {
+  const p = new Uint8Array(16);
+  const tag = "ZcashAddrAlias";
+  for (let i = 0; i < tag.length; i++) p[i] = tag.charCodeAt(i);
+  return p;
+})();
+
+/**
+ * Derive a deterministic 4-word verification phrase from any Zcash address.
+ * Algorithm: BLAKE2b-256 with personalization "ZcashAddrAlias\x00\x00",
+ * first 44 bits split into four 11-bit BIP39 word indices.
+ * Same address always → same phrase; one-character change typically alters 2–4 words.
+ */
+export function deriveAddressAlias(address: string): string {
+  const hash = blake2b(new TextEncoder().encode(address), {
+    dkLen: 32,
+    personalization: ALIAS_PERSONAL,
+  });
+
+  // Extract 44 bits from the first 6 bytes (big-endian)
+  const bits44 =
+    (BigInt(hash[0]) << 36n) |
+    (BigInt(hash[1]) << 28n) |
+    (BigInt(hash[2]) << 20n) |
+    (BigInt(hash[3]) << 12n) |
+    (BigInt(hash[4]) << 4n) |
+    (BigInt(hash[5]) >> 4n);
+
+  const w = (shift: bigint) => bip39English[Number((bits44 >> shift) & 0x7ffn)];
+  return `${w(33n)} ${w(22n)} ${w(11n)} ${w(0n)}`;
 }

@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { QRCodeSVG } from "qrcode.react";
 import { useSettings, useWalletStore } from "@/stores";
 import { isTransparentReceiverAddress } from "@/lib/zcash-address";
+import { AddressAlias } from "@/components/AddressAlias";
 import { Icon } from "@/components/Icon";
 import { toast } from "@/stores/toast";
 import { useWallet } from "@/hooks/useWallet";
@@ -288,7 +289,8 @@ export function Receive() {
                   <QRCodeSVG value={item.addr || "u1"} size={180} marginSize={2} bgColor="#FFFFFF" fgColor="#1A1A18" />
                 </div>
               </div>
-              <div className="t-mono text-gray-600" style={{ marginTop: 10, padding: 10, background: "var(--gray-25)", border: "1px solid var(--gray-100)", borderRadius: "var(--r-md)", wordBreak: "break-all", minHeight: 86 }}>
+              <AddressAlias address={item.addr} />
+              <div className="t-mono text-gray-600" style={{ marginTop: 8, padding: 10, background: "var(--gray-25)", border: "1px solid var(--gray-100)", borderRadius: "var(--r-md)", wordBreak: "break-all", minHeight: 86 }}>
                 {item.addr}
               </div>
               <button className="btn btn-primary btn-block" style={{ marginTop: "auto" }} onClick={() => copy(item.key, item.addr)}>
@@ -358,6 +360,7 @@ export function Receive() {
                   <div className="t-mono text-gray-600" style={{ marginTop: 8, wordBreak: "break-all" }}>
                     {item.addr}
                   </div>
+                  <AddressAlias address={item.addr} />
                   {qrPreviewKey === item.key && (
                     <div style={{ marginTop: 10, display: "flex", justifyContent: "center" }}>
                       <div style={{ padding: 8, background: "#fff", border: "1px solid var(--gray-100)", borderRadius: "var(--r-md)" }}>
