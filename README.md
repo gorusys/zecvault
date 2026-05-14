@@ -1,84 +1,110 @@
-# ZecVault monorepo
+# ZecVault
 
-ZEC-focused vault application with a shared web core and Tauri desktop shells for Windows, macOS, and Linux.
+A privacy-first Zcash savings wallet. Set a goal, name it, save toward it — your keys stay on your device the whole time.
 
-## Layout
+ZecVault wraps a full Zcash wallet (create, receive, send, sync) around a savings-goal layer called **vaults**. You name a vault, set a target amount and deadline, and deposit into it over time. The app tracks your progress and enforces a 24-hour cooldown before you can break a vault early, so you stay accountable to yourself.
 
-### Apps
+It runs as a web app and as native desktop apps on Windows, macOS, and Linux — all from the same codebase.
 
-| Path | Role |
-|------|------|
-| `apps/web` | Main React app (Vite + TanStack Start). Builds client and server outputs. Desktop builds use prerendered client pages. |
-| `apps/windows` | Primary Tauri desktop shell (Windows). Also the baseline mirrored into macOS/Linux shells. |
-| `apps/macos` | Tauri shell for macOS (same app flow and UI as Windows). |
-| `apps/linux` | Tauri shell for Linux (same app flow and UI as Windows). |
-| `apps/pwa` | PWA placeholder/build wrapper. |
-| `apps/browser-extension` | Browser extension scaffold. |
-| `apps/ios` | iOS scaffold. |
-| `apps/android` | Android scaffold. |
-| `apps/mobile` | React Native/Expo scaffold (optional alternative mobile path). |
+---
 
-### Shared packages
+## Getting started
 
-| Path | Role |
-|------|------|
-| `packages/shared` | Shared types/utils (`@zecvault/shared`). |
-| `packages/config` | Shared config contract (`@zecvault/config`). |
-| `packages/assets` | Shared brand assets/placeholders. |
-
-## Prerequisites
-
-- Node 20+ (LTS), npm workspaces enabled.
-- Rust toolchain + platform prerequisites for Tauri:
-  - Windows: MSVC + WebView2 runtime.
-  - macOS: Xcode command line tools.
-  - Linux: distro libs required by Tauri/WebKitGTK.
-
-## Commands (from repo root)
+You need **Node.js 20+** and **pnpm**.
 
 ```bash
-npm install
-npm run dev                # web app
-npm run build              # web production build
-npm run lint
-npm run format
+git clone <repo>
+cd zecvault
+pnpm install
+pnpm dev          # opens the web app at http://localhost:5173
 ```
 
-Desktop dev:
+That's it for the web UI. Wallet features (sync, send, receive) work in mock mode in the browser — you can click through the full app without a native build.
+
+To run the desktop app:
 
 ```bash
-npm run dev:windows
-npm run dev:macos
-npm run dev:linux
+# also requires Rust 1.87+ — see docs/platforms.md for system deps
+pnpm dev:linux    # or dev:macos / dev:windows
 ```
 
-Desktop builds:
+---
 
-```bash
-npm run build:win
-npm run build:mac
-npm run build:linux
+## What's in the repo
+
+```
+apps/
+  web/          The React app — all screens, routing, state
+  linux/        Tauri desktop shell for Linux
+  macos/        Tauri desktop shell for macOS
+  windows/      Tauri desktop shell for Windows
+  pwa/          PWA wrapper (same web app, installable)
+  mobile/       React Native scaffold (future)
+  ios/          iOS scaffold (future)
+  android/      Android scaffold (future)
+  browser-extension/  Extension scaffold (future)
+
+packages/
+  shared/       TypeScript types shared across apps
+  config/       App ID and config values
+
+docs/           All documentation (you're reading one)
+scripts/        Version bump and other tooling
+vendor/         Vendored Rust dependencies
 ```
 
-Workspace-scoped examples:
+The three desktop shells (`linux`, `macos`, `windows`) are thin wrappers around the same web app. The only thing different between them is the platform config — the wallet logic, UI, and routing are identical.
 
-```bash
-npm run build -w @zecvault/web
-npm run dev -w @zecvault/windows
-npm run tauri:build -w @zecvault/windows -- --no-bundle
-```
+---
 
-## Environment
+## How it works
 
-Put `.env` / `VITE_*` files next to `apps/web` (`envDir` points to `apps/web`).
+The app has two layers:
 
-## Product flow docs
+**Frontend** — a React app built with Vite and TanStack Router. It handles all the UI, navigation, and state. When running in a desktop shell, it talks to the wallet backend via Tauri's IPC bridge.
 
-- User flow diagram: `docs/user-flow.md`
-- Platform notes: `docs/platforms.md`
+**Wallet backend** — a Rust library compiled into each Tauri desktop app. It handles key generation, address derivation, syncing with the Zcash network (via lightwalletd), and building/broadcasting transactions. When running in the browser (no Tauri), wallet calls return mock data so the UI still works.
 
-## Notes
+See [docs/architecture.md](docs/architecture.md) for a fuller picture of how these fit together.
 
-- Desktop shells (`windows`, `macos`, `linux`) are aligned to the same UI/UX and routing behavior.
-- For desktop builds, the web app uses a desktop build mode (`build:desktop`) with prerendered client pages.
-- If project path changes cause stale cargo artifacts, run `cargo clean` in the target app’s `src-tauri` folder.
+---
+
+## Common tasks
+
+| Task | Command |
+|---|---|
+| Start web dev server | `pnpm dev` |
+| Start Linux desktop | `pnpm dev:linux` |
+| Build web app | `pnpm build` |
+| Build Linux installer | `pnpm build:linux` |
+| Build macOS app | `pnpm build:mac` |
+| Build Windows installer | `pnpm build:win` |
+| Lint | `pnpm lint` |
+| Format | `pnpm format` |
+| Bump version | `pnpm version:bump` |
+
+---
+
+## Contributing
+
+The frontend lives in `apps/web/src/`. Most features you'd want to add or change are in `src/screens/` (the full-page views), `src/stores/` (app state), or `src/lib/` (pure utilities).
+
+If you're touching wallet behaviour on desktop — sync, sending, receiving, key handling — that's in `apps/linux/src-tauri/src/lib.rs` (same file mirrored across the three desktop shells).
+
+Before opening a PR:
+- Run `pnpm lint` and `pnpm format`
+- Test the feature in the browser (`pnpm dev`) for layout/flow
+- If you changed Rust code, test the desktop build (`pnpm dev:linux` or platform of choice)
+
+---
+
+## Further reading
+
+| Doc | What it covers |
+|---|---|
+| [docs/architecture.md](docs/architecture.md) | How the frontend and wallet backend connect |
+| [docs/wallet-backend.md](docs/wallet-backend.md) | How sync, send, and key management work |
+| [docs/vault-protocol.md](docs/vault-protocol.md) | How vaults work and how deposits are tracked |
+| [docs/security.md](docs/security.md) | How keys and mnemonics are protected |
+| [docs/user-flow.md](docs/user-flow.md) | Full onboarding and app navigation flow |
+| [docs/platforms.md](docs/platforms.md) | Build and distribution notes per platform |
