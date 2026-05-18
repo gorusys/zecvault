@@ -1,0 +1,13 @@
+diff --git a/postinstall.js b/postinstall.js
+--- a/postinstall.js
++++ b/postinstall.js
+@@ -1,5 +1,9 @@
+ #!/usr/bin/env node
+
++// Windows: zx has no shell quote function and PATH uses ';' not ':'.
++// Zig is not needed for native Windows builds — skip silently.
++if (process.platform === 'win32') process.exit(0);
++
+ import * as fs from 'fs/promises';
+ import { $ } from 'zx';
+ import { binaryPath, install, uninstall, version } from './index.js';

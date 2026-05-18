@@ -4,6 +4,9 @@ settings:
   autoInstallPeers: true
   excludeLinksFromLockfile: false
 
+patchedDependencies:
+  '@ziglang/cli@0.0.14': 91c9a6a43bd1e839216e5e695695076053bc5199803e0995171014dea4f330d0
+
 importers:
 
   .:
@@ -13,7 +16,7 @@ importers:
         version: 9.39.4
       '@ziglang/cli':
         specifier: ^0.0.14
-        version: 0.0.14
+        version: 0.0.14(patch_hash=91c9a6a43bd1e839216e5e695695076053bc5199803e0995171014dea4f330d0)
       cross-env:
         specifier: ^10.1.0
         version: 10.1.0
@@ -5535,7 +5538,7 @@ snapshots:
     transitivePeerDependencies:
       - supports-color
 
-  '@ziglang/cli@0.0.14':
+  '@ziglang/cli@0.0.14(patch_hash=91c9a6a43bd1e839216e5e695695076053bc5199803e0995171014dea4f330d0)':
     dependencies:
       zx: 8.8.5
 

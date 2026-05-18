@@ -3,6 +3,8 @@ packages:
   - "packages/*"
 allowBuilds:
   '@ziglang/cli': true
-  esbuild: set this to true or false
-  sharp: set this to true or false
-  workerd: set this to true or false
+  esbuild: true
+  sharp: true
+  workerd: true
+patchedDependencies:
+  '@ziglang/cli@0.0.14': '.patches/@ziglang+cli@0.0.14.patch'

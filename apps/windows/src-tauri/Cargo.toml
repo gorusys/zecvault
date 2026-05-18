@@ -6,7 +6,7 @@ authors = ["you"]
 license = ""
 repository = ""
 edition = "2021"
-rust-version = "1.85.1"
+rust-version = "1.87.0"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -27,7 +27,7 @@ zip32 = "0.2.1"
 keyring = { version = "3", features = ["apple-native", "windows-native", "linux-native"] }
 argon2 = "0.5"
 aes-gcm = "0.10"
-tonic = { version = "0.12", features = ["tls"] }
+tonic = { version = "0.14", features = ["tls-ring", "tls-webpki-roots"] }
 prost = "0.13"
 tokio = { version = "1", features = ["full"] }
 base64 = "0.22"
@@ -38,8 +38,14 @@ tauri-plugin-log = "2"
 tauri-plugin-store = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-fs = "2"
-zcash_client_sqlite = { version = "0.20.0", features = ["orchard"] }
-zcash_client_backend = { version = "0.22.0", features = ["orchard", "sync", "lightwalletd-tonic", "lightwalletd-tonic-transport"] }
+tauri-plugin-opener = "2"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+zcash_client_sqlite = { version = "0.20.0", features = ["orchard", "transparent-inputs"] }
+zcash_client_backend = { version = "0.22.0", features = ["orchard", "sync", "lightwalletd-tonic", "lightwalletd-tonic-transport", "transparent-inputs"] }
 zcash_proofs = { version = "0.27.0", features = ["bundled-prover"] }
+zcash_address = "0.11"
+transparent = { package = "zcash_transparent", version = "0.7.0" }
+zcash_script = "0.4.4"
 secrecy = "0.8"
 async-trait = "0.1.89"
+rusqlite = "0.37.0"
