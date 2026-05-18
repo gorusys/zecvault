@@ -258,7 +258,7 @@ struct TransferPreviewResult {
     needs_shielding: bool,
 }
 
-const DEFAULT_LIGHTWALLETD_ENDPOINT: &str = "http://88.99.165.25:9067";
+const DEFAULT_LIGHTWALLETD_ENDPOINT: &str = "https://lightwallet.getzecvault.com";
 
 /// Blocks per `sync::run` download/scan step.
 /// 10,000 gives a ~7× reduction in lightwalletd round-trips vs 1,500 for historical syncs
@@ -1060,10 +1060,10 @@ fn lightwalletd_endpoint_candidates(configured: &str, network: &str) -> Vec<Stri
     push_unique(configured);
     match network {
         "mainnet" => {
-            push_unique("http://88.99.165.25:9067");
+            push_unique("https://lightwallet.getzecvault.com");
         }
         "testnet" => {
-            push_unique("http://88.99.165.25:19067");
+            push_unique("https://testnet.lightwallet.getzecvault.com");
         }
         _ => {}
     }

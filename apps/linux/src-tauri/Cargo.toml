@@ -27,7 +27,7 @@ zip32 = "0.2.1"
 keyring = { version = "3", features = ["apple-native", "windows-native", "linux-native"] }
 argon2 = "0.5"
 aes-gcm = "0.10"
-tonic = { version = "0.14", features = ["tls-ring"] }
+tonic = { version = "0.14", features = ["tls-ring", "tls-webpki-roots"] }
 prost = "0.13"
 tokio = { version = "1", features = ["full"] }
 base64 = "0.22"
