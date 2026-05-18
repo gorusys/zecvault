@@ -1,0 +1,4 @@
+# Force LF for pnpm patch files so the hash pnpm computes is consistent
+# across platforms (Windows CI has core.autocrlf=true which would otherwise
+# convert to CRLF and break the patchedDependencies hash check).
+.patches/*.patch text eol=lf
