@@ -17,6 +17,7 @@
     "core:default",
     "store:default",
     "log:default",
+    "opener:default",
     "dialog:allow-save",
     "fs:allow-write-text-file",
     "fs:allow-home-write",

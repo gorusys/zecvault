@@ -5,7 +5,9 @@ settings:
   excludeLinksFromLockfile: false
 
 patchedDependencies:
-  '@ziglang/cli@0.0.14': 91c9a6a43bd1e839216e5e695695076053bc5199803e0995171014dea4f330d0
+  '@ziglang/cli@0.0.14':
+    hash: 91c9a6a43bd1e839216e5e695695076053bc5199803e0995171014dea4f330d0
+    path: .patches/@ziglang+cli@0.0.14.patch
 
 importers:
 
