@@ -54,16 +54,10 @@ importers:
       '@rollup/rollup-darwin-x64':
         specifier: ^4.52.4
         version: 4.60.2
-      '@rollup/rollup-win32-x64-msvc':
-        specifier: ^4.52.4
-        version: 4.60.2
       '@tailwindcss/oxide-darwin-arm64':
         specifier: ^4.2.1
         version: 4.2.4
       '@tailwindcss/oxide-darwin-x64':
-        specifier: ^4.2.1
-        version: 4.2.4
-      '@tailwindcss/oxide-win32-x64-msvc':
         specifier: ^4.2.1
         version: 4.2.4
       '@tauri-apps/cli-darwin-arm64':
@@ -72,16 +66,10 @@ importers:
       '@tauri-apps/cli-darwin-x64':
         specifier: ^2.10.1
         version: 2.10.1
-      '@tauri-apps/cli-win32-x64-msvc':
-        specifier: ^2.10.1
-        version: 2.10.1
       lightningcss-darwin-arm64:
         specifier: ^1.30.2
         version: 1.32.0
       lightningcss-darwin-x64:
-        specifier: ^1.30.2
-        version: 1.32.0
-      lightningcss-win32-x64-msvc:
         specifier: ^1.30.2
         version: 1.32.0
 
