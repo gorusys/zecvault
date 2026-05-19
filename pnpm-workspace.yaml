@@ -1,6 +1,13 @@
 packages:
   - "apps/*"
   - "packages/*"
+supportedArchitectures:
+  os:
+    - darwin
+    - linux
+  cpu:
+    - x64
+    - arm64
 allowBuilds:
   '@ziglang/cli': true
   esbuild: true
