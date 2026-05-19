@@ -1,6 +1,6 @@
 {
   "name": "zecvault",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "private": true,
   "workspaces": [
     "apps/*",
@@ -52,8 +52,17 @@
   },
   "pnpm": {
     "supportedArchitectures": {
-      "os": ["current", "win32", "linux", "darwin"],
-      "cpu": ["current", "x64", "arm64"]
+      "os": [
+        "current",
+        "win32",
+        "linux",
+        "darwin"
+      ],
+      "cpu": [
+        "current",
+        "x64",
+        "arm64"
+      ]
     }
   }
 }
