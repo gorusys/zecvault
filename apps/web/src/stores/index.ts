@@ -489,6 +489,8 @@ interface SettingsState {
   userName: string;
   /** Show Orchard/Sapling/UA technical receive options and technical send labels. */
   expertAddressMode: boolean;
+  /** Show the 4-word verification phrase alongside addresses. */
+  showVerificationPhrase: boolean;
   set: <K extends keyof SettingsState>(k: K, v: SettingsState[K]) => void;
   completeOnboarding: (name: string) => void;
 }
@@ -510,6 +512,7 @@ export const useSettings = create<SettingsState>()(
       onboardingComplete: false,
       userName: "Friend",
       expertAddressMode: false,
+      showVerificationPhrase: true,
       set: (k, v) => set({ [k]: v } as Pick<SettingsState, typeof k>),
       completeOnboarding: (name) => set({ onboardingComplete: true, userName: name }),
     }),
@@ -522,6 +525,7 @@ export const useSettings = create<SettingsState>()(
           ...current,
           ...p,
           expertAddressMode: p.expertAddressMode ?? current.expertAddressMode,
+          showVerificationPhrase: p.showVerificationPhrase ?? current.showVerificationPhrase,
         };
       },
     },

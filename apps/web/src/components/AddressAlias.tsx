@@ -2,6 +2,7 @@ import { useState } from "react";
 import { deriveAddressAlias } from "@/lib/zcash-address";
 import { Icon } from "@/components/Icon";
 import { toast } from "@/stores/toast";
+import { useSettings } from "@/stores";
 
 interface AddressAliasProps {
   address: string;
@@ -9,8 +10,9 @@ interface AddressAliasProps {
 
 export function AddressAlias({ address }: AddressAliasProps) {
   const [copied, setCopied] = useState(false);
+  const showVerificationPhrase = useSettings((s) => s.showVerificationPhrase);
 
-  if (!address) return null;
+  if (!address || !showVerificationPhrase) return null;
 
   const alias = deriveAddressAlias(address);
 

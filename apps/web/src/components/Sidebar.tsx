@@ -13,6 +13,7 @@ export function Sidebar() {
   const activeWalletFingerprint = useWalletStore((s) => s.activeWalletFingerprint);
   const fallbackWalletFingerprint = useWalletStore((s) => s.walletFingerprint);
   const expertAddressMode = useSettings((s) => s.expertAddressMode);
+  const showVerificationPhrase = useSettings((s) => s.showVerificationPhrase);
   const setSetting = useSettings((s) => s.set);
   const syncStatus = useWalletStore((s) => s.syncStatus);
   const syncBlock = useWalletStore((s) => s.syncBlock);
@@ -330,6 +331,19 @@ export function Sidebar() {
             <span className="t-caption text-gray-600">
               {expertAddressMode ? "Expert mode" : "Simple mode"}
             </span>
+          </button>
+          <button
+            className="btn btn-ghost"
+            onClick={() => setSetting("showVerificationPhrase", !showVerificationPhrase)}
+            style={{ height: 28, padding: "0 8px", display: "inline-flex", alignItems: "center", gap: 6, marginTop: 4 }}
+            aria-pressed={showVerificationPhrase}
+            aria-label="Toggle verification phrase"
+          >
+            <span
+              className={`toggle ${showVerificationPhrase ? "on" : ""}`}
+              style={{ transform: "scale(0.82)", transformOrigin: "center", pointerEvents: "none" }}
+            />
+            <span className="t-caption text-gray-600">Verification phrase</span>
           </button>
         </div>
 
