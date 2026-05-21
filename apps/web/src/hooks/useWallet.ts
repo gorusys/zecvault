@@ -164,6 +164,30 @@ export function useWallet() {
     return invoke<boolean>("set_lightwalletd_server", { url });
   }, []);
 
+  const getConnectionConfig = useCallback(async () => {
+    if (!isTauriRuntime()) return null;
+    return invoke<{ mode: string; lightwalletdUrl: string; fullNodeUrl: string }>("get_connection_config");
+  }, []);
+
+  const setConnectionConfig = useCallback(async (
+    mode: string,
+    lightwalletdUrl: string,
+    fullNodeUrl: string,
+  ): Promise<boolean> => {
+    if (!isTauriRuntime()) return false;
+    return invoke<boolean>("set_connection_config", { mode, lightwalletdUrl, fullNodeUrl });
+  }, []);
+
+  const testGrpcConnection = useCallback(async (url: string): Promise<{ ok: boolean; tipHeight?: number; error?: string }> => {
+    if (!isTauriRuntime()) return { ok: false, error: "Not running in Tauri" };
+    try {
+      const tip = await invoke<number>("test_grpc_connection", { url });
+      return { ok: true, tipHeight: tip };
+    } catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : String(e) };
+    }
+  }, []);
+
   const getTransactions = useCallback(async (limit: number): Promise<TxInfo[]> => {
     if (!isTauriRuntime()) return [];
     return invoke<TxInfo[]>("get_transactions", { limit });
@@ -172,6 +196,11 @@ export function useWallet() {
   const getLatestBlockHeight = useCallback(async (): Promise<number> => {
     if (!isTauriRuntime()) return 0;
     return invoke<number>("get_latest_block_height");
+  }, []);
+
+  const getViewingKey = useCallback(async (): Promise<string> => {
+    if (!isTauriRuntime()) throw new Error("Native runtime unavailable.");
+    return invoke<string>("get_viewing_key");
   }, []);
 
   const reconcileDerivedAddresses = useCallback(async (): Promise<NativeWalletSnapshot | null> => {
@@ -197,6 +226,10 @@ export function useWallet() {
       getTransactions,
       getLatestBlockHeight,
       reconcileDerivedAddresses,
+      getConnectionConfig,
+      setConnectionConfig,
+      testGrpcConnection,
+      getViewingKey,
     }),
     [
       getBalance,
@@ -214,6 +247,10 @@ export function useWallet() {
       getTransactions,
       getLatestBlockHeight,
       reconcileDerivedAddresses,
+      getConnectionConfig,
+      setConnectionConfig,
+      testGrpcConnection,
+      getViewingKey,
     ],
   );
 }

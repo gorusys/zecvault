@@ -16,7 +16,7 @@ export type IconName =
   | "check" | "x" | "more" | "search" | "copy" | "info"
   | "shield" | "wallet" | "key" | "bell" | "monitor" | "globe"
   | "chevron-right" | "chevron-left" | "trend-up" | "trend-down" | "flame" | "qr" | "minus" | "square" | "pig" | "owl"
-  | "external-link";
+  | "external-link" | "eye" | "eye-off";
 
 const ICONS: Record<IconName, ReactNode> = {
   home: <><path d="M3 12L12 4l9 8" /><path d="M5 10v10h14V10" /></>,
@@ -53,4 +53,6 @@ const ICONS: Record<IconName, ReactNode> = {
   pig: <path d="M19 9.5c-.6-1-1.5-1.7-2.6-2.1l-.5-1.6a1 1 0 0 0-1.6-.4l-1 .9a8 8 0 0 0-2.3-.3c-3.7 0-6.7 2.4-7.4 5.6l-1.3.6c-.4.2-.5.7-.2 1l1 1c.1 1.5.8 2.8 1.9 3.8V20a1 1 0 0 0 1 1h2a1 1 0 0 0 1-1v-.7a8 8 0 0 0 3.6 0V20a1 1 0 0 0 1 1h2a1 1 0 0 0 1-1v-2.3c1.4-1.3 2.4-3 2.4-4.9 0-.6-.1-1.2-.3-1.7l1.1-.5c.4-.2.4-.8 0-1l-.8-.6zM16.5 12a1 1 0 1 1 0-2 1 1 0 0 1 0 2z" />,
   owl: <><path d="M4 15c0-5 3.6-9 8-9s8 4 8 9v4H4v-4z" /><circle cx="9" cy="13" r="2" /><circle cx="15" cy="13" r="2" /><path d="M12 14.5l-1.5 2h3L12 14.5z" /><path d="M8 6l-2-2M16 6l2-2" /></>,
   "external-link": <><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" /><path d="M15 3h6v6" /><path d="M10 14L21 3" /></>,
+  "eye": <><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7z" /><circle cx="12" cy="12" r="3" /></>,
+  "eye-off": <><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24" /><line x1="1" y1="1" x2="23" y2="23" /></>,
 };
