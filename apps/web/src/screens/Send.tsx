@@ -286,7 +286,7 @@ export function Send() {
             </div>
             <div className="t-caption text-gray-600" style={{ marginTop: 4 }}>
               Recipient
-              <div className="t-mono" style={{ color: "var(--gray-900)", marginTop: 4, wordBreak: "break-all" }}>
+              <div className="t-mono" style={{ color: "var(--gray-900)", marginTop: 4, wordBreak: "break-all", overflowWrap: "anywhere" }}>
                 {normalizedAddr}
               </div>
               <AddressAlias address={normalizedAddr} />
@@ -569,7 +569,7 @@ export function Send() {
                 <div style={{ display: "grid", gap: 10, marginBottom: 16 }}>
                   <div className="hstack between" style={{ padding: "10px 12px", background: "var(--gray-25)", borderRadius: "var(--r-sm)" }}>
                     <span className="t-caption text-gray-600">Recipient</span>
-                    <span className="t-mono" style={{ wordBreak: "break-all", maxWidth: "60%", textAlign: "right" }}>{normalizedAddr}</span>
+                    <span className="t-mono" style={{ wordBreak: "break-all", overflowWrap: "anywhere", minWidth: 0, maxWidth: "60%", textAlign: "right" }}>{normalizedAddr}</span>
                   </div>
                   <div className="hstack between" style={{ padding: "10px 12px", background: "var(--gray-25)", borderRadius: "var(--r-sm)" }}>
                     <span className="t-caption text-gray-600">Amount</span>
@@ -623,7 +623,7 @@ export function Send() {
             <div style={{ display: "grid", gap: 10 }}>
               <div className="t-caption text-gray-600">
                 Recipient
-                <div className="t-mono" style={{ color: "var(--gray-900)", marginTop: 4, wordBreak: "break-all" }}>
+                <div className="t-mono" style={{ color: "var(--gray-900)", marginTop: 4, wordBreak: "break-all", overflowWrap: "anywhere" }}>
                   {normalizedAddr}
                 </div>
                 <AddressAlias address={normalizedAddr} />
@@ -665,7 +665,7 @@ export function Send() {
               {memo.trim() && kind === "private" && (
                 <div style={{ padding: "10px 12px", background: "var(--gray-25)", borderRadius: "var(--r-sm)" }}>
                   <div className="t-caption text-gray-600" style={{ marginBottom: 4 }}>Encrypted memo</div>
-                  <div className="t-body" style={{ whiteSpace: "pre-wrap" }}>{memo.trim()}</div>
+                  <div className="t-body" style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere", wordBreak: "break-word" }}>{memo.trim()}</div>
                 </div>
               )}
             </div>
