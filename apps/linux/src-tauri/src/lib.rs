@@ -58,6 +58,16 @@ use zip32::AccountId;
 static LIGHTWALLETD_SYNC_LOCK: LazyLock<tokio::sync::Mutex<()>> =
     LazyLock::new(|| tokio::sync::Mutex::new(()));
 
+/// Controls which sync algorithm is used for block scanning.
+/// `Dag` is reserved for when `zcash_client_backend` v0.23+ exposes DAGSync
+/// (non-linear / Spend-before-Sync). Until then only `Linear` is active.
+#[derive(Debug, Clone, Default)]
+enum SyncMode {
+    #[default]
+    Linear,
+    // Dag,  // TODO: enable with zcash_client_backend v0.23+ (librustzcash issue #720)
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 struct WalletRecord {
@@ -259,6 +269,58 @@ struct TransferPreviewResult {
 }
 
 const DEFAULT_LIGHTWALLETD_ENDPOINT: &str = "https://lightwallet.getzecvault.com";
+const DEFAULT_FULL_NODE_URL: &str = "http://localhost:9067";
+
+/// Which backend the wallet connects to for block data.
+/// Both modes speak the lightwalletd gRPC protocol (ZIP-307).
+/// `FullNode` targets a local zebrad instance for maximum privacy —
+/// the server never learns which transactions the wallet is scanning.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ConnectionMode {
+    #[default]
+    Lightwalletd,
+    FullNode,
+}
+
+/// Persisted connection settings saved to `connection.json` in the app data directory.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConnectionConfig {
+    #[serde(default)]
+    pub mode: ConnectionMode,
+    #[serde(default)]
+    pub lightwalletd_url: String,
+    /// URL of a local zebrad node (speaks the same gRPC protocol as lightwalletd).
+    #[serde(default)]
+    pub full_node_url: String,
+}
+
+impl Default for ConnectionConfig {
+    fn default() -> Self {
+        Self {
+            mode: ConnectionMode::Lightwalletd,
+            lightwalletd_url: DEFAULT_LIGHTWALLETD_ENDPOINT.to_string(),
+            full_node_url: DEFAULT_FULL_NODE_URL.to_string(),
+        }
+    }
+}
+
+impl ConnectionConfig {
+    /// Returns the gRPC URL that should be used for the current mode.
+    pub fn active_url(&self) -> &str {
+        match self.mode {
+            ConnectionMode::FullNode if !self.full_node_url.is_empty() => &self.full_node_url,
+            _ => {
+                if self.lightwalletd_url.is_empty() {
+                    DEFAULT_LIGHTWALLETD_ENDPOINT
+                } else {
+                    &self.lightwalletd_url
+                }
+            }
+        }
+    }
+}
 
 /// Blocks per `sync::run` download/scan step.
 /// 10,000 gives a ~7× reduction in lightwalletd round-trips vs 1,500 for historical syncs
@@ -367,6 +429,24 @@ impl BlockCache for MemoryBlockCache {
     }
 
     async fn insert(&self, mut compact_blocks: Vec<CompactBlock>) -> Result<(), Self::Error> {
+        // Strip trial-decryption data from transactions with unusually many outputs (spam mitigation).
+        // Preserves cmu/cmx/nullifier for commitment-tree integrity; clears ephemeral_key and
+        // ciphertext which are only used for trial decryption and not needed for tree building.
+        const SPAM_TX_OUTPUT_THRESHOLD: usize = 50;
+        for block in &mut compact_blocks {
+            for tx in &mut block.vtx {
+                if tx.outputs.len() + tx.actions.len() > SPAM_TX_OUTPUT_THRESHOLD {
+                    for output in &mut tx.outputs {
+                        output.ephemeral_key.clear();
+                        output.ciphertext.clear();
+                    }
+                    for action in &mut tx.actions {
+                        action.ephemeral_key.clear();
+                        action.ciphertext.clear();
+                    }
+                }
+            }
+        }
         let highest_height = {
             let mut blocks = self
                 .blocks
@@ -786,10 +866,7 @@ fn default_birthday_height(network: &str) -> u32 {
 /// Falls back to `default_birthday_height` if the network is unreachable, so wallet
 /// creation is never blocked by a connectivity issue.
 async fn fetch_chain_tip_for_birthday(app: &tauri::AppHandle, network: &str) -> u32 {
-    let endpoint = match load_lightwalletd_endpoint(app) {
-        Ok(ep) => normalize_grpc_endpoint(&ep),
-        Err(_) => DEFAULT_LIGHTWALLETD_ENDPOINT.to_string(),
-    };
+    let endpoint = active_grpc_endpoint(app).unwrap_or_else(|_| DEFAULT_LIGHTWALLETD_ENDPOINT.to_string());
     let candidates = lightwalletd_endpoint_candidates(&endpoint, network);
     match probe_and_connect(&candidates).await {
         Ok((_, tip)) => {
@@ -1032,6 +1109,47 @@ fn load_lightwalletd_endpoint(app: &tauri::AppHandle) -> Result<String, String> 
     Ok(url.to_string())
 }
 
+fn connection_config_file(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("failed to resolve app data dir: {}", e))?;
+    fs::create_dir_all(&dir).map_err(|e| format!("failed to create app data dir: {}", e))?;
+    Ok(dir.join("connection.json"))
+}
+
+fn load_connection_config(app: &tauri::AppHandle) -> Result<ConnectionConfig, String> {
+    let cfg_path = connection_config_file(app)?;
+    if cfg_path.exists() {
+        let raw = fs::read(&cfg_path).map_err(|e| format!("connection config read failed: {}", e))?;
+        if let Ok(cfg) = serde_json::from_slice::<ConnectionConfig>(&raw) {
+            return Ok(cfg);
+        }
+    }
+    // Fall back to legacy lightwalletd.json so existing installs keep their configured endpoint.
+    let legacy_url = load_lightwalletd_endpoint(app)?;
+    Ok(ConnectionConfig {
+        mode: ConnectionMode::Lightwalletd,
+        lightwalletd_url: legacy_url,
+        full_node_url: DEFAULT_FULL_NODE_URL.to_string(),
+    })
+}
+
+fn save_connection_config(app: &tauri::AppHandle, cfg: &ConnectionConfig) -> Result<(), String> {
+    let cfg_path = connection_config_file(app)?;
+    let bytes =
+        serde_json::to_vec_pretty(cfg).map_err(|e| format!("connection config serialize failed: {}", e))?;
+    fs::write(cfg_path, bytes).map_err(|e| format!("connection config write failed: {}", e))?;
+    Ok(())
+}
+
+/// Returns the normalized gRPC URL to use for the current connection config.
+/// All sync/send code should call this instead of `load_lightwalletd_endpoint` directly.
+fn active_grpc_endpoint(app: &tauri::AppHandle) -> Result<String, String> {
+    let cfg = load_connection_config(app)?;
+    Ok(normalize_grpc_endpoint(cfg.active_url()))
+}
+
 fn normalize_grpc_endpoint(raw: &str) -> String {
     let trimmed = raw.trim();
     if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
@@ -1217,6 +1335,7 @@ async fn sync_wallet_for_network<P>(
     seed_bytes: &[u8],
     mut client: CompactTxStreamerClient<Channel>,
     tip_height: u32,
+    sync_mode: SyncMode,
 ) -> Result<(), String>
 where
     P: zcash_protocol::consensus::Parameters + Clone + Send + Sync + 'static,
@@ -1306,15 +1425,18 @@ where
         wallet.wallet_fingerprint,
         tip_height
     );
-    sync::run(
-        &mut client,
-        &params,
-        &db_cache,
-        &mut db_data,
-        LIGHTWALLETD_SYNC_BATCH_SIZE,
-    )
-    .await
-    .map_err(|e| format!("wallet sync failed: {}", e))?;
+    match sync_mode {
+        SyncMode::Linear => sync::run(
+            &mut client,
+            &params,
+            &db_cache,
+            &mut db_data,
+            LIGHTWALLETD_SYNC_BATCH_SIZE,
+        )
+        .await
+        .map_err(|e| format!("wallet sync failed: {}", e))?,
+        // SyncMode::Dag => sync::run_dag(...).await?,  // TODO: enable with zcash_client_backend v0.23+
+    }
     log::info!(
         "sync::run complete: wallet={} elapsed_ms={}",
         wallet.wallet_fingerprint,
@@ -2160,7 +2282,7 @@ async fn get_balance(app: tauri::AppHandle) -> Result<BalanceInfo, String> {
         match res {
             Ok(mut bal) => {
                 if !wallet.transparent_address.trim().is_empty() {
-                    let endpoint = normalize_grpc_endpoint(&load_lightwalletd_endpoint(&app)?);
+                    let endpoint = active_grpc_endpoint(&app)?;
                     match fetch_transparent_balance_fallback(&endpoint, wallet.transparent_address.trim()).await
                     {
                         Ok(tb) if tb > bal.transparent_zat => {
@@ -2245,6 +2367,31 @@ fn get_unified_address(app: tauri::AppHandle) -> Result<String, String> {
     ensure_app_unlocked(&app, &store)?;
     let wallet = active_wallet(&store).ok_or_else(|| "Wallet is not initialized.".to_string())?;
     Ok(wallet.unified_address.clone())
+}
+
+#[tauri::command]
+fn get_viewing_key(app: tauri::AppHandle) -> Result<String, String> {
+    let path = wallet_store_file(&app)?;
+    let store = read_wallet_store(&path)?;
+    ensure_app_unlocked(&app, &store)?;
+    let wallet = active_wallet(&store).ok_or_else(|| "Wallet is not initialized.".to_string())?.clone();
+    let mnemonic = wallet_plain_mnemonic(&app, &store, &wallet)?;
+    let seed = Mnemonic::parse_in_normalized(Language::English, &mnemonic)
+        .map_err(|e| format!("mnemonic parse failed: {}", e))?
+        .to_seed("");
+    let account = AccountId::try_from(wallet.account_index)
+        .map_err(|_| format!("invalid account index: {}", wallet.account_index))?;
+    let ufvk = match wallet.network.as_str() {
+        "testnet" => UnifiedSpendingKey::from_seed(&TEST_NETWORK, &seed, account)
+            .map_err(|e| format!("key derivation failed: {}", e))?
+            .to_unified_full_viewing_key()
+            .encode(&TEST_NETWORK),
+        _ => UnifiedSpendingKey::from_seed(&MAIN_NETWORK, &seed, account)
+            .map_err(|e| format!("key derivation failed: {}", e))?
+            .to_unified_full_viewing_key()
+            .encode(&MAIN_NETWORK),
+    };
+    Ok(ufvk)
 }
 
 /// Fetch ALL confirmed transparent UTXOs for `taddr` from lightwalletd (start_height = 0 so
@@ -2445,7 +2592,7 @@ async fn preview_transfer(
 
     // Connect to lightwalletd so we can refresh transparent UTXOs before proposing.
     // This ensures historical t-address UTXOs (received before wallet birthday) are visible.
-    let endpoint = normalize_grpc_endpoint(&load_lightwalletd_endpoint(&app)?);
+    let endpoint = active_grpc_endpoint(&app)?;
     let endpoint_candidates = lightwalletd_endpoint_candidates(&endpoint, wallet.network.as_str());
     // If connection fails proceed without UTXO refresh — the proposal may still succeed from cached DB state.
     let mut lwd_client_opt = probe_and_connect(&endpoint_candidates).await.ok().map(|(c, _)| c);
@@ -2601,7 +2748,7 @@ async fn shield_transparent_funds(
         .map_err(|e| format!("mnemonic parse failed: {}", e))?
         .to_seed("");
 
-    let endpoint = normalize_grpc_endpoint(&load_lightwalletd_endpoint(&app)?);
+    let endpoint = active_grpc_endpoint(&app)?;
     let endpoint_candidates = lightwalletd_endpoint_candidates(&endpoint, wallet.network.as_str());
     let (client, tip_height) = probe_and_connect(&endpoint_candidates).await?;
 
@@ -2613,7 +2760,7 @@ async fn shield_transparent_funds(
                 Some(ZcashPoolAddress::Transparent(ta)) => ta,
                 _ => return Err(format!("Could not decode transparent address: {}", taddr_str)),
             };
-            sync_wallet_for_network(MAIN_NETWORK, &app, &wallet, &seed, client.clone(), tip_height).await?;
+            sync_wallet_for_network(MAIN_NETWORK, &app, &wallet, &seed, client.clone(), tip_height, SyncMode::Linear).await?;
             let data_db_path = wallet_data_db_path(&app, wallet_db_key(&wallet))?;
             let mut db_data = WalletDb::for_path(&data_db_path, MAIN_NETWORK, SystemClock, rand::rngs::OsRng)
                 .map_err(|e| format!("wallet db open failed: {}", e))?;
@@ -2688,7 +2835,7 @@ async fn shield_transparent_funds(
                 Some(ZcashPoolAddress::Transparent(ta)) => ta,
                 _ => return Err(format!("Could not decode transparent address: {}", taddr_str)),
             };
-            sync_wallet_for_network(TEST_NETWORK, &app, &wallet, &seed, client.clone(), tip_height).await?;
+            sync_wallet_for_network(TEST_NETWORK, &app, &wallet, &seed, client.clone(), tip_height, SyncMode::Linear).await?;
             let data_db_path = wallet_data_db_path(&app, wallet_db_key(&wallet))?;
             let mut db_data = WalletDb::for_path(&data_db_path, TEST_NETWORK, SystemClock, rand::rngs::OsRng)
                 .map_err(|e| format!("wallet db open failed: {}", e))?;
@@ -2897,7 +3044,7 @@ async fn send_max_transfer(
     let seed = Mnemonic::parse_in_normalized(Language::English, &mnemonic)
         .map_err(|e| format!("mnemonic parse failed: {}", e))?
         .to_seed("");
-    let endpoint = normalize_grpc_endpoint(&load_lightwalletd_endpoint(&app)?);
+    let endpoint = active_grpc_endpoint(&app)?;
     let endpoint_candidates = lightwalletd_endpoint_candidates(&endpoint, wallet.network.as_str());
     let (client, tip_height) = probe_and_connect(&endpoint_candidates).await?;
 
@@ -2908,7 +3055,7 @@ async fn send_max_transfer(
         "mainnet" => {
             let recipient = ZcashAddress::try_from_encoded(&to_trimmed)
                 .map_err(|e| format!("Invalid recipient address: {}", e))?;
-            sync_wallet_for_network(MAIN_NETWORK, &app, &wallet, &seed, client.clone(), tip_height).await?;
+            sync_wallet_for_network(MAIN_NETWORK, &app, &wallet, &seed, client.clone(), tip_height, SyncMode::Linear).await?;
             let data_db_path = wallet_data_db_path(&app, wallet_db_key(&wallet))?;
             let mut db_data = WalletDb::for_path(&data_db_path, MAIN_NETWORK, SystemClock, rand::rngs::OsRng)
                 .map_err(|e| format!("wallet db open failed: {}", e))?;
@@ -2965,7 +3112,7 @@ async fn send_max_transfer(
         "testnet" => {
             let recipient = ZcashAddress::try_from_encoded(&to_trimmed)
                 .map_err(|e| format!("Invalid recipient address: {}", e))?;
-            sync_wallet_for_network(TEST_NETWORK, &app, &wallet, &seed, client.clone(), tip_height).await?;
+            sync_wallet_for_network(TEST_NETWORK, &app, &wallet, &seed, client.clone(), tip_height, SyncMode::Linear).await?;
             let data_db_path = wallet_data_db_path(&app, wallet_db_key(&wallet))?;
             let mut db_data = WalletDb::for_path(&data_db_path, TEST_NETWORK, SystemClock, rand::rngs::OsRng)
                 .map_err(|e| format!("wallet db open failed: {}", e))?;
@@ -3042,7 +3189,7 @@ async fn migrate_sapling_to_orchard(app: tauri::AppHandle) -> Result<String, Str
     let seed = Mnemonic::parse_in_normalized(Language::English, &mnemonic)
         .map_err(|e| format!("mnemonic parse failed: {}", e))?
         .to_seed("");
-    let endpoint = normalize_grpc_endpoint(&load_lightwalletd_endpoint(&app)?);
+    let endpoint = active_grpc_endpoint(&app)?;
     let endpoint_candidates = lightwalletd_endpoint_candidates(&endpoint, wallet.network.as_str());
     let (client, tip_height) = probe_and_connect(&endpoint_candidates).await?;
 
@@ -3051,7 +3198,7 @@ async fn migrate_sapling_to_orchard(app: tauri::AppHandle) -> Result<String, Str
     let spend_pools = &[ShieldedProtocol::Sapling];
     let txid = match wallet.network.as_str() {
         "mainnet" => {
-            sync_wallet_for_network(MAIN_NETWORK, &app, &wallet, &seed, client.clone(), tip_height).await?;
+            sync_wallet_for_network(MAIN_NETWORK, &app, &wallet, &seed, client.clone(), tip_height, SyncMode::Linear).await?;
             let data_db_path = wallet_data_db_path(&app, wallet_db_key(&wallet))?;
             let mut db_data = WalletDb::for_path(&data_db_path, MAIN_NETWORK, SystemClock, rand::rngs::OsRng)
                 .map_err(|e| format!("wallet db open failed: {}", e))?;
@@ -3114,7 +3261,7 @@ async fn migrate_sapling_to_orchard(app: tauri::AppHandle) -> Result<String, Str
         "testnet" => {
             let recipient2 = ZcashAddress::try_from_encoded(&orchard_ua)
                 .map_err(|e| format!("Invalid Orchard address: {}", e))?;
-            sync_wallet_for_network(TEST_NETWORK, &app, &wallet, &seed, client.clone(), tip_height).await?;
+            sync_wallet_for_network(TEST_NETWORK, &app, &wallet, &seed, client.clone(), tip_height, SyncMode::Linear).await?;
             let data_db_path = wallet_data_db_path(&app, wallet_db_key(&wallet))?;
             let mut db_data = WalletDb::for_path(&data_db_path, TEST_NETWORK, SystemClock, rand::rngs::OsRng)
                 .map_err(|e| format!("wallet db open failed: {}", e))?;
@@ -3228,7 +3375,7 @@ async fn execute_transfer(app: tauri::AppHandle, proposal_json: String) -> Resul
     let seed = Mnemonic::parse_in_normalized(Language::English, &mnemonic)
         .map_err(|e| format!("mnemonic parse failed: {}", e))?
         .to_seed("");
-    let endpoint = normalize_grpc_endpoint(&load_lightwalletd_endpoint(&app)?);
+    let endpoint = active_grpc_endpoint(&app)?;
     let endpoint_candidates = lightwalletd_endpoint_candidates(&endpoint, wallet.network.as_str());
     let (client, tip_height) = probe_and_connect(&endpoint_candidates).await?;
 
@@ -3256,7 +3403,7 @@ async fn execute_transfer(app: tauri::AppHandle, proposal_json: String) -> Resul
     match wallet.network.as_str() {
         "mainnet" => {
             let mut broadcast_client = client.clone();
-            sync_wallet_for_network(MAIN_NETWORK, &app, wallet, &seed, client.clone(), tip_height).await?;
+            sync_wallet_for_network(MAIN_NETWORK, &app, wallet, &seed, client.clone(), tip_height, SyncMode::Linear).await?;
             let data_db_path = wallet_data_db_path(&app, wallet_db_key(wallet))?;
             let mut db_data = WalletDb::for_path(&data_db_path, MAIN_NETWORK, SystemClock, rand::rngs::OsRng)
                 .map_err(|e| format!("wallet db open failed: {}", e))?;
@@ -3351,7 +3498,7 @@ async fn execute_transfer(app: tauri::AppHandle, proposal_json: String) -> Resul
         }
         "testnet" => {
             let mut broadcast_client = client.clone();
-            sync_wallet_for_network(TEST_NETWORK, &app, wallet, &seed, client.clone(), tip_height).await?;
+            sync_wallet_for_network(TEST_NETWORK, &app, wallet, &seed, client.clone(), tip_height, SyncMode::Linear).await?;
             let data_db_path = wallet_data_db_path(&app, wallet_db_key(wallet))?;
             let mut db_data = WalletDb::for_path(&data_db_path, TEST_NETWORK, SystemClock, rand::rngs::OsRng)
                 .map_err(|e| format!("wallet db open failed: {}", e))?;
@@ -3458,7 +3605,7 @@ fn start_sync(app: tauri::AppHandle) -> Result<(), String> {
     let seed = Mnemonic::parse_in_normalized(Language::English, &mnemonic)
         .map_err(|e| format!("mnemonic parse failed: {}", e))?
         .to_seed("");
-    let endpoint = normalize_grpc_endpoint(&load_lightwalletd_endpoint(&app)?);
+    let endpoint = active_grpc_endpoint(&app)?;
     let endpoint_candidates = lightwalletd_endpoint_candidates(&endpoint, active.network.as_str());
     log::info!(
         "start_sync requested: wallet={} network={} configured_endpoint={} candidates={}",
@@ -3520,8 +3667,8 @@ fn start_sync(app: tauri::AppHandle) -> Result<(), String> {
             },
         );
         let sync_res = match active.network.as_str() {
-            "mainnet" => sync_wallet_for_network(MAIN_NETWORK, &app_handle, &active, &seed, client, tip_height).await,
-            "testnet" => sync_wallet_for_network(TEST_NETWORK, &app_handle, &active, &seed, client, tip_height).await,
+            "mainnet" => sync_wallet_for_network(MAIN_NETWORK, &app_handle, &active, &seed, client, tip_height, SyncMode::Linear).await,
+            "testnet" => sync_wallet_for_network(TEST_NETWORK, &app_handle, &active, &seed, client, tip_height, SyncMode::Linear).await,
             _ => Err("Unsupported network. Use mainnet or testnet.".to_string()),
         };
         if let Err(error) = sync_res {
@@ -3614,6 +3761,11 @@ fn get_transactions(app: tauri::AppHandle, limit: u32) -> Result<Vec<TxInfo>, St
                       AND SUBSTR(memo, 1, 1) != X'F6'
                     UNION ALL
                     SELECT memo FROM sapling_received_notes
+                    WHERE transaction_id = t.id_tx
+                      AND memo IS NOT NULL
+                      AND SUBSTR(memo, 1, 1) != X'F6'
+                    UNION ALL
+                    SELECT memo FROM sent_notes
                     WHERE transaction_id = t.id_tx
                       AND memo IS NOT NULL
                       AND SUBSTR(memo, 1, 1) != X'F6'
@@ -3710,7 +3862,7 @@ async fn get_latest_block_height(app: tauri::AppHandle) -> Result<u32, String> {
     let store = read_wallet_store(&path)?;
     ensure_app_unlocked(&app, &store)?;
     let active = active_wallet(&store).ok_or_else(|| "Wallet is not initialized.".to_string())?;
-    let endpoint = normalize_grpc_endpoint(&load_lightwalletd_endpoint(&app)?);
+    let endpoint = active_grpc_endpoint(&app)?;
     let endpoint_candidates = lightwalletd_endpoint_candidates(&endpoint, active.network.as_str());
     let (_, tip_height) = probe_and_connect(&endpoint_candidates).await?;
     log::info!(
@@ -3720,6 +3872,50 @@ async fn get_latest_block_height(app: tauri::AppHandle) -> Result<u32, String> {
         tip_height
     );
     Ok(tip_height)
+}
+
+#[tauri::command]
+fn get_connection_config(app: tauri::AppHandle) -> Result<ConnectionConfig, String> {
+    load_connection_config(&app)
+}
+
+#[tauri::command]
+fn set_connection_config(
+    app: tauri::AppHandle,
+    mode: String,
+    lightwalletd_url: String,
+    full_node_url: String,
+) -> Result<bool, String> {
+    let parsed_mode = match mode.as_str() {
+        "full_node" => ConnectionMode::FullNode,
+        _ => ConnectionMode::Lightwalletd,
+    };
+    let lwd = normalize_grpc_endpoint(if lightwalletd_url.is_empty() {
+        DEFAULT_LIGHTWALLETD_ENDPOINT
+    } else {
+        &lightwalletd_url
+    });
+    let fnu = normalize_grpc_endpoint(if full_node_url.is_empty() {
+        DEFAULT_FULL_NODE_URL
+    } else {
+        &full_node_url
+    });
+    let cfg = ConnectionConfig {
+        mode: parsed_mode,
+        lightwalletd_url: lwd,
+        full_node_url: fnu,
+    };
+    save_connection_config(&app, &cfg)?;
+    Ok(true)
+}
+
+#[tauri::command]
+async fn test_grpc_connection(url: String) -> Result<u32, String> {
+    let normalized = normalize_grpc_endpoint(&url);
+    match probe_and_connect(&[normalized]).await {
+        Ok((_, tip)) => Ok(tip),
+        Err(e) => Err(format!("connection test failed: {}", e)),
+    }
 }
 
 #[tauri::command]
@@ -3869,6 +4065,7 @@ pub fn run() {
             get_balance,
             wallet_get_balance,
             get_unified_address,
+            get_viewing_key,
             preview_transfer,
             shield_transparent_funds,
             preview_send_max,
@@ -3880,7 +4077,10 @@ pub fn run() {
             get_transactions,
             get_latest_block_height,
             get_market_price,
-            set_lightwalletd_server
+            set_lightwalletd_server,
+            get_connection_config,
+            set_connection_config,
+            test_grpc_connection
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
