@@ -8,10 +8,15 @@ import { Icon } from "@/components/Icon";
 import { VaultCard } from "@/components/VaultCard";
 import { NewVaultDrawer } from "./NewVaultDrawer";
 import { toast } from "@/stores/toast";
+import { useWallet } from "@/hooks/useWallet";
 
 export function Dashboard() {
   const userName = useSettings((s) => s.userName);
   const expertAddressMode = useSettings((s) => s.expertAddressMode);
+  const hideBalance = useSettings((s) => s.hideBalance);
+  const setSetting = useSettings((s) => s.set);
+  const walletApi = useWallet();
+  const [shielding, setShielding] = useState(false);
   const {
     totalZat,
     spendableZat,
@@ -70,6 +75,18 @@ export function Dashboard() {
     if (!value) return;
     navigator.clipboard?.writeText(value);
     toast({ type: "success", title: `${label} address copied` });
+  }
+
+  async function handleShield() {
+    setShielding(true);
+    try {
+      const txid = await walletApi.shieldFunds();
+      toast({ type: "success", title: "Shielding initiated", description: `Tx: ${txid.slice(0, 16)}…` });
+    } catch (e) {
+      toast({ type: "danger", title: "Shielding failed", description: e instanceof Error ? e.message : String(e) });
+    } finally {
+      setShielding(false);
+    }
   }
 
   return (
@@ -144,12 +161,56 @@ export function Dashboard() {
         </div>
       )}
 
+      {/* Transparent funds shielding banner */}
+      {transparentZat > 0 && (
+        <div style={{
+          marginBottom: 20, padding: "12px 16px",
+          borderRadius: "var(--r-md)",
+          background: "var(--warning-bg, #fffbeb)",
+          border: "1px solid var(--warning-200, #fde68a)",
+          display: "flex", alignItems: "center", gap: 12,
+        }}>
+          <span style={{ color: "var(--warning-600, #d97706)", flexShrink: 0 }}>
+            <Icon name="shield" size={18} />
+          </span>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div className="t-body-med" style={{ color: "var(--warning-800, #92400e)" }}>
+              Transparent funds detected
+            </div>
+            <div className="t-caption" style={{ color: "var(--warning-700, #b45309)", marginTop: 2 }}>
+              {fmtZec(transparentZat)} ZEC is publicly visible on-chain. Shield it to protect your privacy.
+            </div>
+          </div>
+          <button
+            type="button"
+            className="btn btn-secondary"
+            style={{ flexShrink: 0, height: 32, padding: "0 14px" }}
+            onClick={() => void handleShield()}
+            disabled={shielding}
+          >
+            {shielding ? "Shielding…" : "Shield now"}
+          </button>
+        </div>
+      )}
+
       {/* Portfolio card */}
-      <div className="card card-pad" style={{ marginBottom: 28 }}>
+      <div className="card card-pad" style={{ marginBottom: 28, position: "relative" }}>
+        <button
+          type="button"
+          onClick={() => setSetting("hideBalance", !hideBalance)}
+          title={hideBalance ? "Show balances" : "Hide balances"}
+          style={{
+            position: "absolute", top: 14, right: 14,
+            background: "none", border: "none", cursor: "pointer",
+            color: "var(--gray-400)", padding: 4, borderRadius: "var(--r-sm)",
+          }}
+        >
+          <Icon name={hideBalance ? "eye-off" : "eye"} size={16} />
+        </button>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 0 }}>
-          <Stat label="Total balance" value={Number(totalZat) / 1e8} fiat={fmtFiat(totalZat, zecUsdPrice)} color="var(--gray-800)" />
-          <Stat label="Locked in vaults" value={lockedZat / 1e8} fiat={fmtFiat(lockedZat, zecUsdPrice)} color="var(--coral-400)" divider />
-          <Stat label="Available to send" value={Number(spendableZat) / 1e8} fiat={fmtFiat(spendableZat, zecUsdPrice)} color="var(--success-strong)" divider />
+          <Stat label="Total balance" value={Number(totalZat) / 1e8} fiat={fmtFiat(totalZat, zecUsdPrice)} color="var(--gray-800)" hidden={hideBalance} />
+          <Stat label="Locked in vaults" value={lockedZat / 1e8} fiat={fmtFiat(lockedZat, zecUsdPrice)} color="var(--coral-400)" divider hidden={hideBalance} />
+          <Stat label="Available to send" value={Number(spendableZat) / 1e8} fiat={fmtFiat(spendableZat, zecUsdPrice)} color="var(--success-strong)" divider hidden={hideBalance} />
           <div style={{ paddingLeft: 24, borderLeft: "1px solid var(--gray-100)" }}>
             <div className="t-label">ZEC price</div>
             <div className="hstack gap-8" style={{ marginTop: 6 }}>
@@ -171,7 +232,7 @@ export function Dashboard() {
                   <span className="t-caption text-gray-600">
                     Orchard <span className="pill pill-success" style={{ fontSize: "0.7rem", padding: "1px 6px" }}>private</span>
                   </span>
-                  <span className="t-mono t-caption">{fmtZec(orchardZat)} ZEC</span>
+                  <span className="t-mono t-caption">{hideBalance ? "••••••" : `${fmtZec(orchardZat)} ZEC`}</span>
                 </div>
               )}
               {saplingZat > 0 && (
@@ -179,7 +240,7 @@ export function Dashboard() {
                   <span className="t-caption text-gray-600">
                     Sapling <span className="pill" style={{ fontSize: "0.7rem", padding: "1px 6px", background: "#e0f2f7", color: "#0077a0", border: "none" }}>private</span>
                   </span>
-                  <span className="t-mono t-caption">{fmtZec(saplingZat)} ZEC</span>
+                  <span className="t-mono t-caption">{hideBalance ? "••••••" : `${fmtZec(saplingZat)} ZEC`}</span>
                 </div>
               )}
               {transparentZat > 0 && (
@@ -187,7 +248,7 @@ export function Dashboard() {
                   <span className="t-caption text-gray-600">
                     Transparent <span className="pill pill-warning" style={{ fontSize: "0.7rem", padding: "1px 6px" }}>public</span>
                   </span>
-                  <span className="t-mono t-caption">{fmtZec(transparentZat)} ZEC</span>
+                  <span className="t-mono t-caption">{hideBalance ? "••••••" : `${fmtZec(transparentZat)} ZEC`}</span>
                 </div>
               )}
             </div>
@@ -288,15 +349,21 @@ export function Dashboard() {
   );
 }
 
-function Stat({ label, value, fiat, color, divider }: { label: string; value: number; fiat: string; color: string; divider?: boolean }) {
+function Stat({ label, value, fiat, color, divider, hidden }: { label: string; value: number; fiat: string; color: string; divider?: boolean; hidden?: boolean }) {
   return (
     <div style={{ paddingLeft: divider ? 24 : 0, paddingRight: 24, borderLeft: divider ? "1px solid var(--gray-100)" : "none" }}>
       <div className="t-label">{label}</div>
       <div className="t-number tabular" style={{ color, marginTop: 6 }}>
-        <AnimatedNumber value={value} decimals={4} />
-        <span className="t-caption text-gray-400" style={{ marginLeft: 6, fontWeight: 500 }}>ZEC</span>
+        {hidden ? (
+          <span style={{ letterSpacing: 3, color: "var(--gray-400)" }}>••••••</span>
+        ) : (
+          <>
+            <AnimatedNumber value={value} decimals={4} />
+            <span className="t-caption text-gray-400" style={{ marginLeft: 6, fontWeight: 500 }}>ZEC</span>
+          </>
+        )}
       </div>
-      <div className="t-caption text-gray-400" style={{ marginTop: 4 }}>{fiat}</div>
+      <div className="t-caption text-gray-400" style={{ marginTop: 4 }}>{hidden ? "——" : fiat}</div>
     </div>
   );
 }
