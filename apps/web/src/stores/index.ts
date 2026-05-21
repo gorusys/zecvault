@@ -12,6 +12,7 @@ import {
 
 // ---------- Types ----------
 export type SyncStatus = "synced" | "syncing" | "error";
+export type ConnectionMode = "lightwalletd" | "full_node";
 
 export interface TxRecord {
   id: string;
@@ -276,6 +277,16 @@ export const useWalletStore = create<WalletState>()(
       },
       addTx: (tx) => set({ txHistory: [tx, ...get().txHistory] }),
       setNativeTxHistory: (txs) => set((state) => {
+        const activeKey = state.activeWalletFingerprint || state.walletFingerprint;
+        // If every tx in the batch belongs to a different wallet, discard silently.
+        // Only apply this guard when activeKey is known — if it's empty we have no baseline
+        // to compare against, so we accept the batch rather than risk discarding valid data.
+        if (activeKey && txs.length > 0 && txs.every((tx) => tx.walletFingerprint && tx.walletFingerprint !== activeKey)) {
+          return {};
+        }
+        // Don't wipe existing history with an empty poll result. A genuinely empty wallet
+        // stays empty naturally; wallet switches clear history explicitly via applyWalletSnapshot.
+        if (txs.length === 0) return {};
         const custom = state.txHistory.filter((tx) => !tx.id.startsWith("native:"));
         const merged = [...txs, ...custom].sort((a, b) => b.timestamp - a.timestamp);
         return { txHistory: merged };
@@ -478,6 +489,8 @@ interface SettingsState {
   currency: "USD" | "SGD" | "EUR" | "GBP" | "JPY";
   zecDecimals: 2 | 4 | 8;
   lightwalletdEndpoint: string;
+  connectionMode: ConnectionMode;
+  fullNodeUrl: string;
   network: "mainnet" | "testnet";
   biometricsEnabled: boolean;
   pinEnabled: boolean;
@@ -491,6 +504,8 @@ interface SettingsState {
   expertAddressMode: boolean;
   /** Show the 4-word verification phrase alongside addresses. */
   showVerificationPhrase: boolean;
+  /** Hide balance numbers on the dashboard (privacy screen). */
+  hideBalance: boolean;
   set: <K extends keyof SettingsState>(k: K, v: SettingsState[K]) => void;
   completeOnboarding: (name: string) => void;
 }
@@ -502,6 +517,8 @@ export const useSettings = create<SettingsState>()(
       currency: "USD",
       zecDecimals: 4,
       lightwalletdEndpoint: "https://zec.rocks:443",
+      connectionMode: "lightwalletd" as ConnectionMode,
+      fullNodeUrl: "http://localhost:9067",
       network: "mainnet",
       biometricsEnabled: true,
       pinEnabled: false,
@@ -513,6 +530,7 @@ export const useSettings = create<SettingsState>()(
       userName: "Friend",
       expertAddressMode: false,
       showVerificationPhrase: true,
+      hideBalance: false,
       set: (k, v) => set({ [k]: v } as Pick<SettingsState, typeof k>),
       completeOnboarding: (name) => set({ onboardingComplete: true, userName: name }),
     }),

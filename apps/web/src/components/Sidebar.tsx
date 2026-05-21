@@ -102,6 +102,12 @@ export function Sidebar() {
         const walletKey = state.activeWalletFingerprint || state.walletFingerprint;
         if (!walletKey) return;
         const txs = await walletApi.getTransactions(200);
+        // Guard: if the active wallet changed while the request was in-flight, discard
+        // these results. The new wallet's effect will issue its own fresh fetch.
+        const stateAfter = useWalletStore.getState();
+        const currentKey = stateAfter.activeWalletFingerprint || stateAfter.walletFingerprint;
+        if (currentKey !== walletKey) return;
+        console.info("[zecvault][txpoll] fetched=%d wallet=%s", txs.length, walletKey);
         const nativeTxs: TxRecord[] = txs.map((tx) => ({
           id: `native:${tx.txid}`,
           type: tx.isIncoming ? "received" : "sent",
