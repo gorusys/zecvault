@@ -1,7 +1,7 @@
 import { useMemo, useState, type CSSProperties, type ReactNode } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useWalletStore, useVaultStore } from "@/stores";
-import { fmtZec, formatRelativeTime, truncateAddress } from "@/lib/zec";
+import { fmtZec, fmtConfirmations, formatRelativeTime, truncateAddress } from "@/lib/zec";
 import { categoryOf } from "@/lib/categories";
 import { Icon } from "@/components/Icon";
 
@@ -95,6 +95,7 @@ export function History() {
   const fallbackWalletFingerprint = useWalletStore((s) => s.walletFingerprint);
   const activeWalletKey = activeWalletFingerprint || fallbackWalletFingerprint;
   const syncStatus = useWalletStore((s) => s.syncStatus);
+  const syncBlock = useWalletStore((s) => s.syncBlock);
   const [tab, setTab] = useState<typeof TABS[number]>("All");
   const [q, setQ] = useState("");
   const [expandedTx, setExpandedTx] = useState<string | null>(null);
@@ -194,14 +195,31 @@ export function History() {
                     {poolBadges.map(({ label, bg, clr }) => (
                       <span key={label} className="pill" style={{ marginLeft: 6, background: bg, color: clr, border: "none" }}>{label}</span>
                     ))}
-                    {isNativeTx && tx.blockHeight > 0 && <span className="pill" style={{ marginLeft: 6 }}>Mined</span>}
-                    {isNativeTx && tx.blockHeight === 0 && <span className="pill" style={{ marginLeft: 6 }}>Pending</span>}
+                    {isNativeTx && (() => {
+                      const conf = fmtConfirmations(tx.blockHeight, syncBlock);
+                      const isPending = conf === "Pending";
+                      const isConfirmed = conf === "Confirmed";
+                      return (
+                        <span className="pill" style={{
+                          marginLeft: 6,
+                          background: isPending ? "var(--gray-100)" : isConfirmed ? "var(--green-100, #dcfce7)" : "var(--amber-100, #fef9c3)",
+                          color: isPending ? "var(--gray-500)" : isConfirmed ? "var(--green-700, #15803d)" : "var(--amber-700, #b45309)",
+                        }}>
+                          {conf}
+                        </span>
+                      );
+                    })()}
                   </div>
                   <div className="t-caption text-gray-400">
                     {(tx.toAddress || tx.fromAddress) ? truncateAddress(tx.toAddress || tx.fromAddress || "") : "shielded"}
                     {" • "}
                     {formatRelativeTime(tx.timestamp)}
                   </div>
+                  {tx.memo && !tx.memo.startsWith("ZV1:") && (
+                    <div className="t-caption" style={{ marginTop: 2, color: "var(--gray-500)", fontStyle: "italic", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                      {tx.memo.length > 60 ? tx.memo.slice(0, 60) + "…" : tx.memo}
+                    </div>
+                  )}
                 </div>
                 <div className="t-mono-lg tabular" style={{ color, fontWeight: 600 }}>{tx.amountZat > 0 ? "+" : "−"}{fmtZec(Math.abs(tx.amountZat))}</div>
               </button>
@@ -240,6 +258,12 @@ export function History() {
                       <div style={{ display: "flex", gap: 8, alignItems: "flex-start", flexWrap: "wrap" }}>
                         <span className="text-gray-500" style={{ flexShrink: 0, minWidth: 72 }}>Block</span>
                         <span className="t-mono" style={wrapMono}>{tx.blockHeight.toLocaleString()}</span>
+                      </div>
+                    )}
+                    {isNativeTx && tx.blockHeight > 0 && (
+                      <div style={{ display: "flex", gap: 8, alignItems: "flex-start", flexWrap: "wrap" }}>
+                        <span className="text-gray-500" style={{ flexShrink: 0, minWidth: 72 }}>Confirmations</span>
+                        <span className="t-mono" style={wrapMono}>{Math.max(0, syncBlock - tx.blockHeight + 1).toLocaleString()}</span>
                       </div>
                     )}
                     <div style={{ display: "flex", gap: 8, alignItems: "flex-start", flexWrap: "wrap" }}>

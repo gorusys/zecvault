@@ -56,6 +56,13 @@ export function daysBetween(from: number, to: number): number {
   return Math.max(0, Math.ceil((to - from) / 86_400_000));
 }
 
+export function fmtConfirmations(blockHeight: number, syncBlock: number): string {
+  if (blockHeight === 0 || syncBlock === 0) return "Pending";
+  const n = Math.max(0, syncBlock - blockHeight + 1);
+  if (n >= 10) return "Confirmed";
+  return `${n} conf.`;
+}
+
 export function fmtDate(ts: number): string {
   return new Date(ts).toLocaleDateString(undefined, {
     month: "short", day: "numeric", year: "numeric",
