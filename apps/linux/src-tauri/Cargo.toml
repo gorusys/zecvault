@@ -49,6 +49,7 @@ zcash_address = "0.11"
 # Direct dep so we can use OutPoint / TxOut / Script for transparent UTXO refresh.
 transparent = { package = "zcash_transparent", version = "0.7.0" }
 zcash_script = "0.4.4"
+zcash_primitives = "0.27.0"
 secrecy = "0.8"
 async-trait = "0.1.89"
 rusqlite = "0.37.0"

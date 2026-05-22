@@ -20,7 +20,11 @@ use tauri::Emitter;
 use zcash_client_backend::data_api::wallet::{
     ConfirmationsPolicy, SpendingKeys, TargetHeight, create_proposed_transactions,
     propose_shielding, propose_standard_transfer_to_address, propose_send_max_transfer,
+    decrypt_and_store_transaction,
 };
+use zcash_client_backend::data_api::TransactionDataRequest;
+use zcash_primitives::transaction::Transaction as ZcashTransaction;
+use zcash_protocol::consensus::BranchId;
 use zcash_client_backend::data_api::wallet::input_selection::GreedyInputSelector;
 use zcash_client_backend::data_api::chain::{BlockCache, BlockSource};
 use zcash_client_backend::data_api::{Account as WalletAccount, AccountBirthday, AccountSource, InputSource, MaxSpendMode, TransparentOutputFilter, WalletRead, WalletWrite};
@@ -1442,6 +1446,61 @@ where
         wallet.wallet_fingerprint,
         sync_started.elapsed().as_millis()
     );
+
+    // Fetch full transactions for any notes detected via compact-block scanning.
+    // Compact blocks omit the memo field; the full transaction is required to decrypt memos.
+    // zcash_client_backend::sync::run() intentionally skips this step, so we do it ourselves.
+    {
+        let enhance_started = Instant::now();
+        let data_requests = db_data.transaction_data_requests()
+            .map_err(|e| format!("tx data requests failed: {}", e))?;
+        let mut enhanced = 0usize;
+        let mut enhance_errors = 0usize;
+        for req in &data_requests {
+            if let TransactionDataRequest::Enhancement(txid) = req {
+                let hash = txid.as_ref().to_vec();
+                match client.get_transaction(service::TxFilter { hash, ..Default::default() }).await {
+                    Ok(resp) => {
+                        let raw_tx = resp.into_inner();
+                        let height = if raw_tx.height > 0 && raw_tx.height < u64::from(u32::MAX) {
+                            Some(BlockHeight::from_u32(raw_tx.height as u32))
+                        } else {
+                            None
+                        };
+                        let branch_id = height
+                            .map(|h| BranchId::for_height(&params, h))
+                            .unwrap_or_else(|| BranchId::for_height(&params, BlockHeight::from_u32(tip_height)));
+                        match ZcashTransaction::read(&raw_tx.data[..], branch_id) {
+                            Ok(tx) => {
+                                match decrypt_and_store_transaction(&params, &mut db_data, &tx, height) {
+                                    Ok(_) => enhanced += 1,
+                                    Err(e) => {
+                                        enhance_errors += 1;
+                                        log::warn!(
+                                            "[enhance] store failed: txid={:?} err={}",
+                                            txid, e
+                                        );
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                enhance_errors += 1;
+                                log::warn!("[enhance] parse failed: txid={:?} err={}", txid, e);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        enhance_errors += 1;
+                        log::warn!("[enhance] GetTransaction failed: txid={:?} err={}", txid, e);
+                    }
+                }
+            }
+        }
+        log::info!(
+            "[enhance] wallet={} enhanced={} errors={} elapsed_ms={}",
+            wallet.wallet_fingerprint, enhanced, enhance_errors, enhance_started.elapsed().as_millis()
+        );
+    }
 
     // Store transparent UTXOs fetched directly from lightwalletd so they appear in
     // v_transactions (and therefore get_transactions) even before the historical block scan
@@ -3747,28 +3806,29 @@ fn get_transactions(app: tauri::AppHandle, limit: u32) -> Result<Vec<TxInfo>, St
                 LIMIT 1
             ) AS received_at,
             (
-                -- ZIP-302: text memos start with 0x73; 0xF6 first byte = empty sentinel.
-                SELECT
-                    CASE
-                        WHEN SUBSTR(rn.memo, 1, 1) = X'73' AND LENGTH(rn.memo) > 1
-                        THEN TRIM(REPLACE(SUBSTR(CAST(rn.memo AS TEXT), 2), X'00', ''))
-                        ELSE NULL
-                    END
+                -- ZIP-302 text memos: first byte <= 0xF4 means UTF-8 text (no prefix byte).
+                -- 0xF6 = empty sentinel, 0xFF = arbitrary bytes, 0xF5-0xFE = future formats.
+                -- memo_repr() stores via as_slice() which already strips trailing null padding,
+                -- so no null-byte replacement is needed.
+                SELECT CAST(rn.memo AS TEXT)
                 FROM (
                     SELECT memo FROM orchard_received_notes
                     WHERE transaction_id = t.id_tx
                       AND memo IS NOT NULL
                       AND SUBSTR(memo, 1, 1) != X'F6'
+                      AND SUBSTR(memo, 1, 1) <= X'F4'
                     UNION ALL
                     SELECT memo FROM sapling_received_notes
                     WHERE transaction_id = t.id_tx
                       AND memo IS NOT NULL
                       AND SUBSTR(memo, 1, 1) != X'F6'
+                      AND SUBSTR(memo, 1, 1) <= X'F4'
                     UNION ALL
                     SELECT memo FROM sent_notes
                     WHERE transaction_id = t.id_tx
                       AND memo IS NOT NULL
                       AND SUBSTR(memo, 1, 1) != X'F6'
+                      AND SUBSTR(memo, 1, 1) <= X'F4'
                 ) rn
                 LIMIT 1
             ) AS memo_text,
