@@ -112,7 +112,7 @@ checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
 
 [[package]]
 name = "app"
-version = "0.1.7"
+version = "0.1.10"
 dependencies = [
  "aes-gcm",
  "argon2",
@@ -141,6 +141,7 @@ dependencies = [
  "zcash_client_backend",
  "zcash_client_sqlite",
  "zcash_keys",
+ "zcash_primitives",
  "zcash_proofs",
  "zcash_protocol",
  "zcash_script",
